@@ -1,0 +1,77 @@
+# AXI4-Lite register maps
+
+The final `mlkem_secure_channel_complete_axi_top` has one ML-KEM load/control
+slave port and one AEAD traffic slave port. Both reach the same protected
+session table.
+
+## AEAD traffic port
+
+All registers are 32-bit. Multiword byte strings use little-endian word
+packing: protocol bytes 0..3 occupy bits 0..31 of word 0.
+
+| Offset | Name | Description |
+|---:|---|---|
+| `0x000` | VERSION | `0x00010000` |
+| `0x004` | CONTROL | bit 0 START, bit 1 DECRYPT, bit 8 CLEAR_DONE |
+| `0x008` | STATUS | bit 0 BUSY, 1 DONE, 2 AUTH_OK, 3 ERROR, 4 CFG_PENDING, 5 REQ_PENDING, 6 KDF_BUSY |
+| `0x00C` | REQUEST_SLOT | Session-table slot 0..3 |
+| `0x010` | DATA_LEN | Meaningful plaintext bytes, 0..64 |
+| `0x014` | COUNTER_LO | Received counter for decryption |
+| `0x018` | COUNTER_HI | Received counter for decryption |
+| `0x01C` | RSP_COUNTER_LO | Counter used in the completed request |
+| `0x020` | RSP_COUNTER_HI | Counter used in the completed request |
+| `0x024` | FAULT | bit 8 fault detected, bits 7:0 fault code |
+| `0x028` | CFG_SESSION_ID | Protocol session ID |
+| `0x02C` | CFG_CONTROL | bit 31 APPLY, bit 8 VALID, bits 1:0 SLOT |
+| `0x040..0x05C` | TX_KEY[0..7] | 256-bit TX key |
+| `0x060..0x07C` | RX_KEY[0..7] | 256-bit RX key |
+| `0x080` | TX_PREFIX | Four nonce-prefix bytes |
+| `0x084` | RX_PREFIX | Four nonce-prefix bytes |
+| `0x100..0x13C` | INPUT_DATA[0..15] | Plaintext or ciphertext, fixed 64 bytes |
+| `0x140..0x14C` | INPUT_TAG[0..3] | Received tag for decryption |
+| `0x180..0x1BC` | OUTPUT_DATA[0..15] | Ciphertext or authenticated plaintext |
+| `0x1C0..0x1CC` | OUTPUT_TAG[0..3] | Generated/calculated tag |
+| `0x200` | KDF_CONTROL | bit 0 START; installs the derived session into REQUEST_SLOT |
+| `0x204..0x220` | SHARED_SECRET[0..7] | 32-byte ML-KEM shared secret from Decaps |
+| `0x224..0x240` | TRANSCRIPT_HASH[0..7] | SHA3-256(public key || ciphertext || session ID) |
+
+## Request sequence
+
+```text
+wait STATUS.BUSY=0 and STATUS.REQ_PENDING=0
+write CONTROL.CLEAR_DONE
+write slot, length, counter, input data, and optional input tag
+write CONTROL.START plus optional CONTROL.DECRYPT
+poll STATUS.DONE
+check AUTH_OK and ERROR
+read response counter, output data, and output tag
+```
+
+The wrapper contains no request FIFO. Software must not modify request
+registers between START and completion of the current operation.
+
+## ML-KEM session installation
+
+For the final dual-AXI top this is automatic after protected Decaps; software
+must not use the standalone manual configuration/KDF registers described
+below.
+
+## ML-KEM load/control port
+
+| Offset | Name | Description |
+|---:|---|---|
+| `0x00` | VERSION | `0x00020000` |
+| `0x04` | CONTROL | bit 0 START, bit 8 CLEAR_DONE |
+| `0x08` | STATUS | bit 1 BUSY, bit 2 DONE, bit 3 FAIL |
+| `0x0C` | SLOT | Destination session slot 0..3 |
+| `0x10` | SESSION_ID | 32-bit protocol session ID |
+| `0x20` | MEM_REGION | 0 secret key, 1 ciphertext |
+| `0x24` | MEM_ADDR | Auto-incrementing 32-bit word address |
+| `0x28` | MEM_DATA | Data read/write window |
+
+## Standalone AEAD manual installation
+
+Write `REQUEST_SLOT`, `CFG_SESSION_ID`, the shared secret and transcript hash,
+then write `KDF_CONTROL.START`. PL computes
+`SHAKE256("ZYNQ-PQC-v1" || K || transcript_hash, 72)`, assigns ZB→PC material
+to TX and PC→ZB material to RX, resets both counters, and marks the slot valid.

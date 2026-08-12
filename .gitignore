@@ -1,0 +1,38 @@
+# Vivado generated directories
+.Xil/
+**/.Xil/
+**/*.cache/
+**/*.gen/
+**/*.runs/
+**/*.ip_user_files/
+**/*.sim/
+**/*.hw/
+
+# Simulation/build outputs
+work/
+tmp/
+-p/
+xsim.dir/
+**/xsim.dir/
+**/xsim_work/
+
+# Generated FPGA and tool files
+*.bit
+*.dcp
+*.ltx
+*.wdb
+*.vcd
+*.pb
+*.jou
+*.log
+*.str
+
+# Generated reports
+*.rpt
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
