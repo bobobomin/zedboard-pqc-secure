@@ -18,11 +18,18 @@ module mlkem_secure_channel_complete_axi_top #(
   input logic[5:0]fault_inject_i,output logic fault_detected_o,output logic[7:0]fault_code_o);
   logic[3:0]qv,qr,qd,sv,sready,sauth,serr;logic[31:0]qlen;
   logic[255:0]qcount,scount;logic[2047:0]qdata,sdata;logic[511:0]qtag,stag;
+  /* Single reset synchroniser for this clock domain: the board reset asserts
+     asynchronously and releases on a clock edge, so every block below starts
+     on the same edge. */
+  (* ASYNC_REG="TRUE" *) logic[1:0]rst_sync_q;logic rst_sync_n;
+  always_ff @(posedge aclk or negedge aresetn)
+    if(!aresetn)rst_sync_q<=2'b00;else rst_sync_q<={rst_sync_q[0],1'b1};
+  assign rst_sync_n=rst_sync_q[1];
   mlkem_secure_channel_fault_protected_axi_top #(.MAX_STAGE_CYCLES(MAX_STAGE_CYCLES)) core(
-    aclk,aresetn,m_awaddr,m_awvalid,m_awready,m_wdata,m_wstrb,m_wvalid,m_wready,m_bresp,m_bvalid,m_bready,
+    aclk,rst_sync_n,m_awaddr,m_awvalid,m_awready,m_wdata,m_wstrb,m_wvalid,m_wready,m_bresp,m_bvalid,m_bready,
     m_araddr,m_arvalid,m_arready,m_rdata,m_rresp,m_rvalid,m_rready,fault_inject_i,
     fault_detected_o,fault_code_o,qv,qr,qd,qlen,qcount,qdata,qtag,sv,sready,sauth,serr,scount,sdata,stag);
-  aead_traffic_axi_lite_frontend traffic(aclk,aresetn,a_awaddr,a_awvalid,a_awready,
+  aead_traffic_axi_lite_frontend traffic(aclk,rst_sync_n,a_awaddr,a_awvalid,a_awready,
     a_wdata,a_wstrb,a_wvalid,a_wready,a_bresp,a_bvalid,a_bready,a_araddr,a_arvalid,a_arready,
     a_rdata,a_rresp,a_rvalid,a_rready,fault_detected_o,fault_code_o,qv,qr,qd,qlen,qcount,
     qdata,qtag,sv,sready,sauth,serr,scount,sdata,stag);
