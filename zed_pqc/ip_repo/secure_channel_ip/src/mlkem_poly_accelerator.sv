@@ -23,9 +23,14 @@ module mlkem_poly_accelerator (
     output logic signed [15:0] host_rdata_o
 );
     localparam logic [1:0] CMD_NTT=2'd0, CMD_INTT=2'd1, CMD_BASEMUL=2'd2;
-    typedef enum logic [3:0] {IDLE, NTT_READ, NTT_WRITE,
-                              INTT_SCALE_READ, INTT_SCALE_WRITE,
-                              INTT_READ, INTT_WRITE,
+    typedef enum logic [4:0] {IDLE,
+                              NTT_READ, NTT_MUL, NTT_MONT,
+                              NTT_REDUCE, NTT_WRITE,
+                              INTT_SCALE_READ, INTT_SCALE_MUL,
+                              INTT_SCALE_MONT, INTT_SCALE_REDUCE,
+                              INTT_SCALE_WRITE,
+                              INTT_READ, INTT_PREP, INTT_MUL,
+                              INTT_MONT, INTT_REDUCE, INTT_WRITE,
                               BASEMUL_READ, BASEMUL_MUL,
                               BASEMUL_ZETA, BASEMUL_WRITE} state_t;
     state_t state;
@@ -44,6 +49,18 @@ module mlkem_poly_accelerator (
     logic signed [15:0] basemul_p11_reg, basemul_p00_reg;
     logic signed [15:0] basemul_p01_reg, basemul_p10_reg;
     logic signed [15:0] basemul_p11z_reg;
+
+    /* NTT/INTT arithmetic pipeline.  A combinational fqmul contains three
+     * dependent multiplies (coefficient product and the two Montgomery
+     * reduction multiplies).  Keep one multiply per clock stage so the
+     * BRAM-to-BRAM butterfly path can meet the ZedBoard clock constraint. */
+    logic signed [15:0] butterfly_a_reg;
+    logic signed [15:0] intt_sum_reg, intt_diff_reg;
+    logic signed [31:0] fq_product_reg;
+    logic signed [15:0] mont_multiplier_reg;
+    logic signed [15:0] fq_result_reg;
+    logic signed [31:0] barrett_accum_reg, barrett_temp_reg;
+    logic signed [15:0] barrett_result_reg;
 
     function automatic logic signed [15:0] montgomery_reduce(
         input logic signed [31:0] value);
@@ -150,16 +167,16 @@ module mlkem_poly_accelerator (
             end
             NTT_WRITE:begin
                 a_addr0=butterfly;a_addr1=butterfly+span;a_we0=1;a_we1=1;
-                a_din0=a_dout0+fqmul(a_dout1,zetas[zeta_index]);
-                a_din1=a_dout0-fqmul(a_dout1,zetas[zeta_index]);
+                a_din0=butterfly_a_reg+fq_result_reg;
+                a_din1=butterfly_a_reg-fq_result_reg;
             end
             INTT_SCALE_READ:a_addr0=butterfly;
             INTT_SCALE_WRITE:begin a_addr0=butterfly;a_we0=1;
-                a_din0=fqmul(a_dout0,16'sd1441);end
+                a_din0=fq_result_reg;end
             INTT_WRITE:begin
                 a_addr0=butterfly;a_addr1=butterfly+span;a_we0=1;a_we1=1;
-                a_din0=barrett_reduce(a_dout0+a_dout1);
-                a_din1=fqmul(a_dout1-a_dout0,zetas[zeta_index]);
+                a_din0=barrett_result_reg;
+                a_din1=fq_result_reg;
             end
             BASEMUL_READ:begin
                 a_addr0=2*pair_index;a_addr1=2*pair_index+1;
@@ -184,6 +201,9 @@ module mlkem_poly_accelerator (
             block_start<=0; butterfly<=0; zeta_index<=0; pair_index<=0;
             basemul_p11_reg<=0;basemul_p00_reg<=0;
             basemul_p01_reg<=0;basemul_p10_reg<=0;basemul_p11z_reg<=0;
+            butterfly_a_reg<=0;intt_sum_reg<=0;intt_diff_reg<=0;
+            fq_product_reg<=0;mont_multiplier_reg<=0;fq_result_reg<=0;
+            barrett_accum_reg<=0;barrett_temp_reg<=0;barrett_result_reg<=0;
         end else begin
             done_o <= 0;
             case (state)
@@ -197,7 +217,21 @@ module mlkem_poly_accelerator (
                     endcase
                 end
 
-                NTT_READ:state<=NTT_WRITE;
+                NTT_READ:state<=NTT_MUL;
+                NTT_MUL: begin
+                    butterfly_a_reg<=a_dout0;
+                    fq_product_reg<=a_dout1*zetas[zeta_index];
+                    state<=NTT_MONT;
+                end
+                NTT_MONT: begin
+                    mont_multiplier_reg<=fq_product_reg[15:0]*16'd62209;
+                    state<=NTT_REDUCE;
+                end
+                NTT_REDUCE: begin
+                    fq_result_reg<=(fq_product_reg-
+                        mont_multiplier_reg*32'sd3329)>>>16;
+                    state<=NTT_WRITE;
+                end
                 NTT_WRITE: begin
                     if (butterfly == block_start+span-1) begin
                         if (block_start+2*span >= 256) begin
@@ -212,14 +246,49 @@ module mlkem_poly_accelerator (
                     end else begin butterfly<=butterfly+1;state<=NTT_READ;end
                 end
 
-                INTT_SCALE_READ:state<=INTT_SCALE_WRITE;
+                INTT_SCALE_READ:state<=INTT_SCALE_MUL;
+                INTT_SCALE_MUL: begin
+                    fq_product_reg<=a_dout0*16'sd1441;
+                    state<=INTT_SCALE_MONT;
+                end
+                INTT_SCALE_MONT: begin
+                    mont_multiplier_reg<=fq_product_reg[15:0]*16'd62209;
+                    state<=INTT_SCALE_REDUCE;
+                end
+                INTT_SCALE_REDUCE: begin
+                    fq_result_reg<=(fq_product_reg-
+                        mont_multiplier_reg*32'sd3329)>>>16;
+                    state<=INTT_SCALE_WRITE;
+                end
                 INTT_SCALE_WRITE: begin
                     if (butterfly==255) begin layer<=7; span<=2; block_start<=0;
                         butterfly<=0; zeta_index<=127; state<=INTT_READ; end
                     else begin butterfly<=butterfly+1;state<=INTT_SCALE_READ;end
                 end
 
-                INTT_READ:state<=INTT_WRITE;
+                INTT_READ:state<=INTT_PREP;
+                INTT_PREP: begin
+                    intt_sum_reg<=a_dout0+a_dout1;
+                    intt_diff_reg<=a_dout1-a_dout0;
+                    state<=INTT_MUL;
+                end
+                INTT_MUL: begin
+                    fq_product_reg<=intt_diff_reg*zetas[zeta_index];
+                    barrett_accum_reg<=32'sd20159*intt_sum_reg+32'sd33554432;
+                    state<=INTT_MONT;
+                end
+                INTT_MONT: begin
+                    mont_multiplier_reg<=fq_product_reg[15:0]*16'd62209;
+                    barrett_temp_reg<=barrett_accum_reg>>>26;
+                    state<=INTT_REDUCE;
+                end
+                INTT_REDUCE: begin
+                    fq_result_reg<=(fq_product_reg-
+                        mont_multiplier_reg*32'sd3329)>>>16;
+                    barrett_result_reg<=intt_sum_reg-
+                        barrett_temp_reg*32'sd3329;
+                    state<=INTT_WRITE;
+                end
                 INTT_WRITE: begin
                     if (butterfly == block_start+span-1) begin
                         if (block_start+2*span >= 256) begin

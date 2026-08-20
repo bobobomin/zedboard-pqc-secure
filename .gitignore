@@ -15,9 +15,14 @@ tmp/
 xsim.dir/
 **/xsim.dir/
 **/xsim_work/
+**/vivado_tmp*/
+**/xsim_tmp*/
+**/vitis_tmp*/
+**/vitis_workspace/
 
 # Generated FPGA and tool files
 *.bit
+*.xsa
 *.dcp
 *.ltx
 *.wdb
@@ -35,4 +40,3 @@ xsim.dir/
 Thumbs.db
 *.swp
 *~
-

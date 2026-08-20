@@ -12,7 +12,6 @@
     },
     "design_tree": {
       "processing_system7_0": "",
-      "mlkem_secure_channel_0": "",
       "ps7_0_axi_periph": {
         "xbar": "",
         "s00_couplers": {
@@ -22,7 +21,8 @@
         "m01_couplers": {}
       },
       "rst_ps7_0_50M": "",
-      "xlconstant_0": ""
+      "xlconstant_0": "",
+      "mlkem_secure_channel_0": ""
     },
     "interface_ports": {
       "DDR": {
@@ -522,12 +522,6 @@
           }
         }
       },
-      "mlkem_secure_channel_0": {
-        "vlnv": "xilinx.com:user:mlkem_secure_channel:1.0",
-        "xci_name": "system_mlkem_secure_channel_0_0",
-        "xci_path": "ip\\system_mlkem_secure_channel_0_0\\system_mlkem_secure_channel_0_0.xci",
-        "inst_hier_path": "mlkem_secure_channel_0"
-      },
       "ps7_0_axi_periph": {
         "vlnv": "xilinx.com:ip:axi_interconnect:2.1",
         "xci_path": "ip\\system_ps7_0_axi_periph_0\\system_ps7_0_axi_periph_0.xci",
@@ -850,18 +844,6 @@
           }
         },
         "interface_nets": {
-          "ps7_0_axi_periph_to_s00_couplers": {
-            "interface_ports": [
-              "S00_AXI",
-              "s00_couplers/S_AXI"
-            ]
-          },
-          "xbar_to_m00_couplers": {
-            "interface_ports": [
-              "xbar/M00_AXI",
-              "m00_couplers/S_AXI"
-            ]
-          },
           "m00_couplers_to_ps7_0_axi_periph": {
             "interface_ports": [
               "M00_AXI",
@@ -874,6 +856,12 @@
               "xbar/S00_AXI"
             ]
           },
+          "ps7_0_axi_periph_to_s00_couplers": {
+            "interface_ports": [
+              "S00_AXI",
+              "s00_couplers/S_AXI"
+            ]
+          },
           "m01_couplers_to_ps7_0_axi_periph": {
             "interface_ports": [
               "M01_AXI",
@@ -884,6 +872,12 @@
             "interface_ports": [
               "xbar/M01_AXI",
               "m01_couplers/S_AXI"
+            ]
+          },
+          "xbar_to_m00_couplers": {
+            "interface_ports": [
+              "xbar/M00_AXI",
+              "m00_couplers/S_AXI"
             ]
           }
         },
@@ -933,6 +927,12 @@
             "value": "6"
           }
         }
+      },
+      "mlkem_secure_channel_0": {
+        "vlnv": "xilinx.com:user:mlkem_secure_channel:1.0",
+        "xci_name": "system_mlkem_secure_channel_0_0",
+        "xci_path": "ip\\system_mlkem_secure_channel_0_0\\system_mlkem_secure_channel_0_0.xci",
+        "inst_hier_path": "mlkem_secure_channel_0"
       }
     },
     "interface_nets": {
@@ -954,16 +954,16 @@
           "mlkem_secure_channel_0/m"
         ]
       },
-      "ps7_0_axi_periph_M00_AXI": {
-        "interface_ports": [
-          "ps7_0_axi_periph/M00_AXI",
-          "mlkem_secure_channel_0/a"
-        ]
-      },
       "processing_system7_0_DDR": {
         "interface_ports": [
           "DDR",
           "processing_system7_0/DDR"
+        ]
+      },
+      "ps7_0_axi_periph_M00_AXI": {
+        "interface_ports": [
+          "ps7_0_axi_periph/M00_AXI",
+          "mlkem_secure_channel_0/a"
         ]
       }
     },
@@ -974,10 +974,10 @@
           "processing_system7_0/M_AXI_GP0_ACLK",
           "ps7_0_axi_periph/S00_ACLK",
           "rst_ps7_0_50M/slowest_sync_clk",
-          "mlkem_secure_channel_0/aclk",
           "ps7_0_axi_periph/M00_ACLK",
           "ps7_0_axi_periph/ACLK",
-          "ps7_0_axi_periph/M01_ACLK"
+          "ps7_0_axi_periph/M01_ACLK",
+          "mlkem_secure_channel_0/aclk"
         ]
       },
       "processing_system7_0_FCLK_RESET0_N": {
@@ -990,10 +990,10 @@
         "ports": [
           "rst_ps7_0_50M/peripheral_aresetn",
           "ps7_0_axi_periph/S00_ARESETN",
-          "mlkem_secure_channel_0/aresetn",
           "ps7_0_axi_periph/M00_ARESETN",
           "ps7_0_axi_periph/ARESETN",
-          "ps7_0_axi_periph/M01_ARESETN"
+          "ps7_0_axi_periph/M01_ARESETN",
+          "mlkem_secure_channel_0/aresetn"
         ]
       },
       "xlconstant_0_dout": {

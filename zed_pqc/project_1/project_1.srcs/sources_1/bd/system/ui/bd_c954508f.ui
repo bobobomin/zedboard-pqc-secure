@@ -3,24 +3,24 @@
    "Default View_ScaleFactor":"0.669151",
    "Default View_TopLeft":"-169,-1072",
    "ExpandedHierarchyInLayout":"",
-   "guistr":"# # String gsaved with Nlview 7.0r6  2020-01-29 bk=1.5227 VDI=41 GEI=36 GUI=JA:10.0 non-TLS-threadsafe
+   "guistr":"# # String gsaved with Nlview 7.0r6  2020-01-29 bk=1.5227 VDI=41 GEI=36 GUI=JA:10.0 non-TLS
 #  -string -flagsOSRD
 preplace port DDR -pg 1 -lvl 6 -x 1460 -y -310 -defaultsOSRD
 preplace port FIXED_IO -pg 1 -lvl 6 -x 1460 -y -290 -defaultsOSRD
 preplace inst processing_system7_0 -pg 1 -lvl 3 -x 540 -y -270 -defaultsOSRD
-preplace inst mlkem_secure_channel_0 -pg 1 -lvl 2 -x 190 -y -550 -defaultsOSRD
 preplace inst ps7_0_axi_periph -pg 1 -lvl 5 -x 1280 -y -510 -defaultsOSRD
 preplace inst rst_ps7_0_50M -pg 1 -lvl 4 -x 940 -y -410 -defaultsOSRD
 preplace inst xlconstant_0 -pg 1 -lvl 1 -x -80 -y -510 -defaultsOSRD
+preplace inst mlkem_secure_channel_0 -pg 1 -lvl 2 -x 190 -y -550 -defaultsOSRD
 preplace netloc processing_system7_0_FCLK_CLK0 1 1 4 10 -270 340 -170 760 -510 1130
 preplace netloc processing_system7_0_FCLK_RESET0_N 1 3 1 770 -430n
 preplace netloc rst_ps7_0_50M_peripheral_aresetn 1 1 4 30 -440 330J -530 NJ -530 1110
 preplace netloc xlconstant_0_dout 1 1 1 N -510
-preplace netloc processing_system7_0_DDR 1 3 3 NJ -310 N -310 N
 preplace netloc processing_system7_0_FIXED_IO 1 3 3 NJ -290 N -290 N
 preplace netloc processing_system7_0_M_AXI_GP0 1 3 2 740 -590 NJ
-preplace netloc ps7_0_axi_periph_M00_AXI 1 1 5 0 -370 NJ -370 750J -300 NJ -300 1440
 preplace netloc ps7_0_axi_periph_M01_AXI 1 1 5 20 -450 340J -520 NJ -520 1120J -370 1430
+preplace netloc ps7_0_axi_periph_M00_AXI 1 1 5 0 -370 NJ -370 750J -300 NJ -300 1440
+preplace netloc processing_system7_0_DDR 1 3 3 NJ -310 N -310 N
 levelinfo -pg 1 -170 -80 190 540 940 1280 1460
 pagesize -pg 1 -db -bbox -sgen -170 -790 1580 200
 "
