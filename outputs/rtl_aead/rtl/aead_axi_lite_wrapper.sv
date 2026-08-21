@@ -48,6 +48,19 @@ module aead_axi_lite_wrapper #(
     localparam logic [9:0] REG_SHARED_SECRET    = 10'h204;
     localparam logic [9:0] REG_TRANSCRIPT_HASH  = 10'h224;
 
+    /* Single reset synchroniser for this clock domain: the board reset asserts
+       asynchronously and releases on a clock edge, so every block below starts
+       on the same edge. */
+    (* ASYNC_REG = "TRUE" *) logic [1:0] rst_sync_q;
+    logic rst_sync_n;
+    always_ff @(posedge s_axi_aclk or negedge s_axi_aresetn) begin
+        if (!s_axi_aresetn)
+            rst_sync_q <= 2'b00;
+        else
+            rst_sync_q <= {rst_sync_q[0], 1'b1};
+    end
+    assign rst_sync_n = rst_sync_q[1];
+
     logic aw_held, w_held;
     logic [C_S_AXI_ADDR_WIDTH-1:0] awaddr_held;
     logic [31:0] wdata_held;
@@ -119,15 +132,15 @@ module aead_axi_lite_wrapper #(
         end
     endfunction
 
-    assign s_axi_awready = !aw_held && !s_axi_bvalid;
-    assign s_axi_wready  = !w_held  && !s_axi_bvalid;
+    assign s_axi_awready = rst_sync_n && !aw_held && !s_axi_bvalid;
+    assign s_axi_wready  = rst_sync_n && !w_held  && !s_axi_bvalid;
     assign s_axi_bresp   = 2'b00;
-    assign s_axi_arready = !s_axi_rvalid;
+    assign s_axi_arready = rst_sync_n && !s_axi_rvalid;
     assign s_axi_rresp   = 2'b00;
 
     /* AXI-Lite channel handling supports independent AW and W arrival. */
-    always_ff @(posedge s_axi_aclk) begin
-        if (!s_axi_aresetn) begin
+    always_ff @(posedge s_axi_aclk or negedge rst_sync_n) begin
+        if (!rst_sync_n) begin
             aw_held       <= 1'b0;
             w_held        <= 1'b0;
             awaddr_held   <= '0;
@@ -238,7 +251,7 @@ module aead_axi_lite_wrapper #(
     end
 
     aead_arbiter_4session u_arbiter (
-        .clk_i(s_axi_aclk), .rst_ni(s_axi_aresetn),
+        .clk_i(s_axi_aclk), .rst_ni(rst_sync_n),
         .cfg_write_i(cfg_pending), .cfg_slot_i(cfg_slot_latched),
         .cfg_valid_i(cfg_valid_latched),
         .cfg_session_id_i(cfg_session_id_latched),
@@ -256,14 +269,14 @@ module aead_axi_lite_wrapper #(
     );
 
     mlkem_session_kdf u_session_kdf (
-        .clk_i(s_axi_aclk),.rst_ni(s_axi_aresetn),.start_i(kdf_start),
+        .clk_i(s_axi_aclk),.rst_ni(rst_sync_n),.start_i(kdf_start),
         .shared_secret_i(kdf_shared_secret),.transcript_hash_i(kdf_transcript_hash),
         .busy_o(kdf_busy),.done_o(kdf_done),.pc_to_zb_key_o(kdf_pc_key),
         .pc_to_zb_prefix_o(kdf_pc_prefix),.zb_to_pc_key_o(kdf_zb_key),
         .zb_to_pc_prefix_o(kdf_zb_prefix));
 
-    always_ff @(posedge s_axi_aclk) begin
-        if (!s_axi_aresetn) begin
+    always_ff @(posedge s_axi_aclk or negedge rst_sync_n) begin
+        if (!rst_sync_n) begin
             request_slot_reg <= '0;
             data_len_reg <= '0;
             counter_reg <= '0;
