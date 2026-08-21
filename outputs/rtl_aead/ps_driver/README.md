@@ -19,14 +19,19 @@ Add these sources to a standalone Cortex-A9 application:
 
 The application performs the following board tests in order:
 
-1. Configure a deterministic AEAD session through AXI-Lite.
-2. Compare hardware ciphertext and Poly1305 tag with the PC golden reference.
-3. Authenticate/decrypt the golden packet and reject a modified tag.
-4. Load the ML-KEM-512 decapsulation key and ciphertext.
-5. Run complete PL decapsulation and atomically install session slot 1.
-6. Decrypt the PC golden packet with the ML-KEM-derived RX key.
-7. Encrypt a ZedBoard response with the direction-separated TX key.
-8. Reject a modified ML-KEM ciphertext.
+1. Load the ML-KEM-512 decapsulation key and ciphertext.
+2. Run complete PL decapsulation and atomically install session slot 1.
+3. Reject a modified Poly1305 tag without advancing the RX counter.
+4. Authenticate/decrypt the PC golden packet and compare its plaintext.
+5. Encrypt a ZedBoard response with the direction-separated TX key.
+6. Compare its packet counter, ChaCha20 ciphertext, and Poly1305 tag with the
+   independently generated PC golden reference.
+7. Reject a modified ML-KEM ciphertext.
+
+The integrated AEAD traffic window intentionally does not expose direct key or
+session-configuration registers to the PS. Session material is installed only
+through the successful ML-KEM path, so standalone direct-session tests for
+`aead_axi_lite_wrapper` do not apply to this packaged secure-channel top.
 
 UART is configured by the generated BSP for PS UART 1 at 115200 baud. A
 successful run ends with `ALL PS-PL HARDWARE TESTS PASSED`.

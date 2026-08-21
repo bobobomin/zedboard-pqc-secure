@@ -34,73 +34,30 @@ static void report_result(const char *name, int passed, int *failures)
         ++(*failures);
 }
 
-static int run_aead_known_answer_test(void)
-{
-    aead_hw_t device;
-    uint8_t ciphertext[AEAD_HW_PACKET_BYTES];
-    uint8_t plaintext[AEAD_HW_PACKET_BYTES];
-    uint8_t tag[AEAD_HW_TAG_BYTES];
-    uint8_t bad_tag[AEAD_HW_TAG_BYTES];
-    uint64_t counter = UINT64_MAX;
-    int failures = 0;
-    int result;
-
-    xil_printf("\r\n-- AEAD AXI known-answer test --\r\n");
-    aead_hw_init(&device, ZED_PQC_AEAD_BASEADDR, ZED_PQC_POLL_LIMIT);
-
-    result = aead_hw_configure_session(
-        &device, 0u, ZED_KAT_SESSION_ID,
-        zed_kat_pc_to_zb_key, zed_kat_pc_to_zb_key,
-        zed_kat_pc_to_zb_prefix, zed_kat_pc_to_zb_prefix);
-    report_result("configure deterministic session", result == AEAD_HW_OK,
-                  &failures);
-    if (result != AEAD_HW_OK)
-        return failures;
-
-    result = aead_hw_encrypt(&device, 0u, zed_kat_plaintext,
-                             ZED_KAT_MESSAGE_BYTES,
-                             ciphertext, tag, &counter);
-    report_result("ChaCha20-Poly1305 encrypt request", result == AEAD_HW_OK,
-                  &failures);
-    if (result == AEAD_HW_OK) {
-        report_result("ciphertext matches PC golden reference",
-                      bytes_equal(ciphertext, zed_kat_ciphertext,
-                                  AEAD_HW_PACKET_BYTES), &failures);
-        report_result("Poly1305 tag matches PC golden reference",
-                      bytes_equal(tag, zed_kat_tag, AEAD_HW_TAG_BYTES),
-                      &failures);
-        report_result("first TX packet counter is zero", counter == 0u,
-                      &failures);
-    }
-
-    result = aead_hw_decrypt(&device, 0u, 0u, ZED_KAT_MESSAGE_BYTES,
-                             zed_kat_ciphertext, zed_kat_tag, plaintext);
-    report_result("authenticated decrypt request", result == AEAD_HW_OK,
-                  &failures);
-    if (result == AEAD_HW_OK)
-        report_result("recovered plaintext matches PC reference",
-                      bytes_equal(plaintext, zed_kat_plaintext,
-                                  ZED_KAT_MESSAGE_BYTES), &failures);
-
-    memcpy(bad_tag, zed_kat_tag, sizeof(bad_tag));
-    bad_tag[0] ^= 1u;
-    memset(plaintext, 0xa5, sizeof(plaintext));
-    result = aead_hw_decrypt(&device, 0u, 1u, ZED_KAT_MESSAGE_BYTES,
-                             zed_kat_ciphertext, bad_tag, plaintext);
-    report_result("tampered tag is rejected", result == AEAD_HW_ERR_AUTH,
-                  &failures);
-    return failures;
-}
-
 static int run_mlkem_secure_channel_test(void)
 {
     secure_channel_hw_t device;
     uint8_t plaintext[AEAD_HW_PACKET_BYTES];
     uint8_t response_ciphertext[AEAD_HW_PACKET_BYTES];
     uint8_t response_tag[AEAD_HW_TAG_BYTES];
+    uint8_t tampered_tag[AEAD_HW_TAG_BYTES];
     uint8_t tampered_kem_ciphertext[MLKEM512_CIPHERTEXT_BYTES];
     uint64_t response_counter = UINT64_MAX;
     static const uint8_t response[] = "ZedBoard secure reply";
+    static const uint8_t expected_response_ciphertext[AEAD_HW_PACKET_BYTES] = {
+        0xb7,0xb2,0x35,0xda,0x3d,0xbb,0xb9,0xec,
+        0xd9,0x10,0xe3,0xde,0x27,0xde,0x0a,0x3a,
+        0x6f,0xc9,0x93,0xae,0xcd,0xbe,0x7e,0x1e,
+        0xae,0xb6,0x74,0x0d,0x1d,0x1f,0xf8,0xfa,
+        0x3d,0xff,0xad,0xe4,0x99,0x4d,0x01,0xf9,
+        0x3f,0xfe,0x34,0x6c,0x86,0x44,0xbd,0x72,
+        0x38,0x60,0x83,0xca,0x10,0x5e,0x9f,0x23,
+        0xcd,0xbc,0x26,0x97,0x87,0x7d,0x85,0xfa
+    };
+    static const uint8_t expected_response_tag[AEAD_HW_TAG_BYTES] = {
+        0x9c,0x2c,0x69,0x58,0x27,0x50,0xaf,0x21,
+        0x29,0xb2,0x20,0xb9,0x9a,0x08,0xe6,0x51
+    };
     int failures = 0;
     int result;
 
@@ -121,6 +78,17 @@ static int run_mlkem_secure_channel_test(void)
     if (result != MLKEM_HW_OK)
         return failures;
 
+    memcpy(tampered_tag, zed_kat_tag, sizeof(tampered_tag));
+    tampered_tag[0] ^= 1u;
+    memset(plaintext, 0xa5, sizeof(plaintext));
+    result = secure_channel_hw_decrypt(
+        &device, 1u, 0u, ZED_KAT_MESSAGE_BYTES,
+        zed_kat_ciphertext, tampered_tag, plaintext);
+    report_result("tampered AEAD tag is rejected",
+                  result == AEAD_HW_ERR_AUTH, &failures);
+
+    /* Authentication failure must not advance the slot's RX counter, so the
+     * valid reference packet still uses counter zero here. */
     result = secure_channel_hw_decrypt(
         &device, 1u, 0u, ZED_KAT_MESSAGE_BYTES,
         zed_kat_ciphertext, zed_kat_tag, plaintext);
@@ -135,7 +103,18 @@ static int run_mlkem_secure_channel_test(void)
         &device, 1u, response, (uint8_t)(sizeof(response) - 1u),
         response_ciphertext, response_tag, &response_counter);
     report_result("encrypt ZedBoard response with derived TX key",
-                  result == AEAD_HW_OK && response_counter == 0u, &failures);
+                  result == AEAD_HW_OK, &failures);
+    if (result == AEAD_HW_OK) {
+        report_result("first TX packet counter is zero",
+                      response_counter == 0u, &failures);
+        report_result("ChaCha20 response ciphertext matches PC golden",
+                      bytes_equal(response_ciphertext,
+                                  expected_response_ciphertext,
+                                  AEAD_HW_PACKET_BYTES), &failures);
+        report_result("Poly1305 response tag matches PC golden",
+                      bytes_equal(response_tag, expected_response_tag,
+                                  AEAD_HW_TAG_BYTES), &failures);
+    }
 
     memcpy(tampered_kem_ciphertext, zed_kat_kem_ciphertext,
            sizeof(tampered_kem_ciphertext));
@@ -160,7 +139,6 @@ int main(void)
     xil_printf("ML-KEM AXI: 0x%08lx\r\n",
                (unsigned long)ZED_PQC_MLKEM_BASEADDR);
 
-    failures += run_aead_known_answer_test();
     failures += run_mlkem_secure_channel_test();
 
     xil_printf("\r\n========================================\r\n");
