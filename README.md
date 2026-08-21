@@ -25,7 +25,9 @@ Zynq PL
     `- fault detection / fail-closed protection
 ```
 
-현재 RTL은 **4개의 논리 세션**을 지원하며 암호 연산 엔진 하나를 공유합니다. 32/64세션 확장은 아직 구현되지 않았으며, 향후 BRAM 기반 indexed session table과 PS 요청 큐 구조로 확장할 계획입니다.
+현재 RTL은 **4개의 논리 세션**을 지원하며 ChaCha20-Poly1305 연산 엔진 하나를 공유합니다. 동시에 유효한 요청은 패킷 단위의 비선점형 round-robin 방식으로 선택합니다. 각 패킷의 처리가 끝난 뒤 다음 세션으로 넘어가며 요청이 없는 슬롯은 건너뜁니다.
+
+현재 PS-facing AEAD AXI-Lite frontend는 `pending/inflight` 요청을 한 개만 보관합니다. 실제 다중 클라이언트 통합에서는 PS 소프트웨어 요청 큐가 필요합니다. 32/64세션 확장은 아직 구현되지 않았으며, 향후 BRAM 기반 indexed session table, descriptor FIFO 및 PS 연결 관리 구조로 확장할 계획입니다.
 
 ## 구현된 기능
 
@@ -59,8 +61,40 @@ Zynq PL
 - fault injection과 fail-closed 동작
 - PS Bring-up 프로그램 ARM 빌드 및 ELF 링크
 
-실제 ZedBoard에서의 PS-PL 하드웨어 검증과 Ethernet 통신은 아직 남아 있습니다.
+실제 ZedBoard에서 단일 세션 PS-PL 하드웨어 bring-up을 완료했습니다. 다중 세션과 Ethernet 통신 검증은 아직 남아 있습니다.
 
+## 실제 ZedBoard 검증 결과
+
+Vivado/Vitis 2020.2와 실제 ZedBoard에서 다음 PS-PL 통합 경로를 검증했습니다.
+
+- PS의 AXI4-Lite 레지스터 접근과 PL 제어
+- ML-KEM-512 decapsulation key와 ciphertext 적재
+- ML-KEM-512 decapsulation 및 AEAD session slot 1 자동 설치
+- ML-KEM에서 생성된 방향별 RX/TX key 사용
+- 변조된 AEAD tag 거부 및 plaintext 차단
+- PC-to-ZedBoard 패킷 복호화와 plaintext golden 비교
+- ZedBoard-to-PC ChaCha20-Poly1305 응답 암호화
+- 첫 TX packet counter가 0인지 확인
+- 응답 ciphertext와 Poly1305 tag를 PC golden vector와 비교
+- 변조된 ML-KEM ciphertext 거부
+
+~~~text
+-- Full ML-KEM to AEAD test --
+[PASS] load ML-KEM-512 decapsulation key
+[PASS] decapsulate and install session slot 1
+[PASS] tampered AEAD tag is rejected
+[PASS] decrypt PC packet with ML-KEM-derived RX key
+[PASS] ML-KEM session plaintext matches reference
+[PASS] encrypt ZedBoard response with derived TX key
+[PASS] first TX packet counter is zero
+[PASS] ChaCha20 response ciphertext matches PC golden
+[PASS] Poly1305 response tag matches PC golden
+[PASS] tampered ML-KEM ciphertext is rejected
+
+ALL PS-PL HARDWARE TESTS PASSED
+~~~
+
+이 결과는 session slot 1을 이용한 단일 요청의 암호 기능과 PS-PL 통합 경로를 검증한 것입니다. 4개 세션 동시 요청, 장시간 반복 및 실제 Ethernet 통신 검증은 아직 남아 있습니다.
 ## 타이밍 최적화 및 구현 결과
 
 BaseMul을 다중 사이클화하고 NTT/INTT의 Montgomery/Barrett 연산을 파이프라인화했습니다.
@@ -69,17 +103,18 @@ BaseMul을 다중 사이클화하고 NTT/INTT의 Montgomery/Barrett 연산을 �
 |---|---:|---:|---:|
 | 최초 구현 | -15.607 ns | -2554.274 ns | 1460 |
 | BaseMul 수정 후 | -1.611 ns | -74.895 ns | 64 |
-| NTT/INTT 수정 후 | **+0.215 ns** | **0 ns** | **0** |
+| NTT/INTT 수정 후 | +0.215 ns | 0 ns | 0 |
+| AXI-Lite 수정 머지 후 최종 구현 | **+0.265 ns** | **0 ns** | **0** |
 
-최종 post-route 결과는 50 MHz timing constraint를 만족합니다. Hold slack은 `+0.014 ns`이며 routing error는 0개입니다.
+최종 post-route 결과는 50 MHz(`20.000 ns`) timing constraint를 만족합니다. Hold slack은 `+0.021 ns`, pulse-width slack은 `+9.020 ns`이며 setup/hold/pulse-width failing endpoint는 모두 0개입니다.
 
 ### XC7Z020 post-implementation 자원 사용량
 
 | Resource | Used | Available | Utilization |
 |---|---:|---:|---:|
-| LUT | 35,847 | 53,200 | 67.38% |
+| LUT | 35,866 | 53,200 | 67.42% |
 | LUTRAM | 62 | 17,400 | 0.36% |
-| FF | 29,803 | 106,400 | 28.01% |
+| FF | 29,815 | 106,400 | 28.02% |
 | BRAM | 7 | 140 | 5.00% |
 | DSP | 61 | 220 | 27.73% |
 | BUFG | 2 | 32 | 6.25% |
@@ -112,7 +147,7 @@ Vivado/Vitis 자동 생성 폴더, bitstream, XSA, ELF 및 로컬 archive는 저
 8. Generate Bitstream을 실행합니다.
 9. bitstream을 포함하여 `system_wrapper.xsa`를 export합니다.
 
-## ZedBoard에서 남은 작업
+## ZedBoard 실행 절차
 
 ### 1. 장비 준비
 
@@ -151,6 +186,53 @@ Bring-up 통과 후 다음 소프트웨어를 추가해야 합니다.
 
 32/64명 최종 데모를 진행하려면 별도 단계에서 session slot 폭을 5/6비트로 확장하고, FF 기반 4세션 테이블을 BRAM 기반 indexed table로 변경한 뒤 PS 연결 관리와 요청 큐를 추가해야 합니다.
 
+## 추가 검증 계획
+
+### 1. 보드 기반 다중 세션 검증
+
+- slot 0~3에 서로 다른 key, nonce prefix 및 session ID 설치
+- 4개 요청을 동시에 유지하여 round-robin 처리 순서 확인
+- 요청이 없는 슬롯을 건너뛰는지 확인
+- 특정 세션의 starvation이 발생하지 않는지 확인
+- 세션별 TX/RX counter가 독립적으로 증가하는지 확인
+- 세션 사이에서 key, nonce 및 결과가 섞이지 않는지 확인
+
+### 2. Counter 및 replay 방지 검증
+
+- 동일 세션의 연속 패킷에서 counter `0 -> 1 -> 2` 확인
+- 각 counter의 암호문과 tag를 PC golden vector와 비교
+- 이전 counter 재전송과 중복 패킷 거부
+- 예상 counter를 건너뛴 패킷 거부
+- 인증 실패 시 RX counter가 증가하지 않는지 확인
+- 세션 재설치·무효화 시 key와 counter 초기화 확인
+
+### 3. 경계값 및 오류 복구 검증
+
+- 길이 0, 1, 63, 64-byte 패킷 처리
+- 64-byte 초과 요청 거부
+- 잘못된 slot, session ID, tag 및 ciphertext 거부
+- FPGA/PS reset 이후 세션 재초기화 확인
+- 처리 중 reset과 timeout 이후 PS 소프트웨어 복구 확인
+- 수천~수만 회 반복 암·복호화 및 ML-KEM decapsulation
+
+### 4. 실제 Ethernet 통합
+
+- Zynq PS용 lwIP Ethernet 서버
+- PC용 ML-KEM/ChaCha20-Poly1305 클라이언트
+- 공개키 fingerprint 등록 및 검증
+- PS 다중 클라이언트 요청 큐
+- 단일 PC 클라이언트 handshake와 양방향 패킷 통신
+- 패킷 손실, 중복, 순서 변경 및 재접속 처리
+- PC 클라이언트 4개의 동시 통신과 공정성 확인
+
+### 5. 성능 및 보안 평가
+
+- ML-KEM decapsulation cycle 수와 latency
+- AEAD encrypt/decrypt latency와 throughput
+- 4클라이언트별 평균·최대 대기시간
+- 보드에서 fault injection과 fail-closed 동작
+- reset 후 key와 민감 데이터 잔존 여부
+- timing/power side-channel 및 fault 공격 별도 평가
 ## 주의
 
-이 저장소는 연구·교육용 프로토타입입니다. 기능 시뮬레이션과 구현 timing은 통과했지만 실제 보드 검증, 상호운용성 시험, side-channel 평가 및 제품 수준의 보안 검증은 아직 완료되지 않았습니다. 실제 서비스용 암호 시스템으로 사용하면 안 됩니다.
+이 저장소는 연구·교육용 프로토타입입니다. 기능 시뮬레이션, 50 MHz 구현 timing 및 단일 세션 PS-PL 보드 bring-up은 통과했지만 다중 세션, Ethernet 상호운용성, 장시간 안정성, side-channel 평가 및 제품 수준의 보안 검증은 아직 완료되지 않았습니다. 실제 서비스용 암호 시스템으로 사용하면 안 됩니다.
