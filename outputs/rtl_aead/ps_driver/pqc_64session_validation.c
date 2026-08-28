@@ -45,8 +45,8 @@ int pqc_64session_validation_run(uintptr_t mlkem_base,
     uint8_t old_slot63_ciphertext[AEAD_HW_PACKET_BYTES];
     uint8_t old_slot63_tag[AEAD_HW_TAG_BYTES];
     uint64_t counter;
-    XTime begin, end;
-    uint32_t total_us;
+    XTime kem_begin, kem_end;
+    uint32_t kem_total_us = 0u;
     uint32_t installed = 0u;
     int counters_ok = 1;
     int distinct_ok = 1;
@@ -65,12 +65,13 @@ int pqc_64session_validation_run(uintptr_t mlkem_base,
 
     memset(previous_ciphertext, 0, sizeof(previous_ciphertext));
     memset(previous_tag, 0, sizeof(previous_tag));
-    XTime_GetTime(&begin);
-
     for (slot = 0u; slot < AEAD_HW_MAX_SESSIONS; ++slot) {
+        XTime_GetTime(&kem_begin);
         result = secure_channel_hw_establish_session(
             &device, zed_kat_kem_ciphertext, (uint8_t)slot,
             SESSION_ID_BASE + slot);
+        XTime_GetTime(&kem_end);
+        kem_total_us += elapsed_us(kem_begin, kem_end);
         if (result != MLKEM_HW_OK)
             break;
 
@@ -98,8 +99,6 @@ int pqc_64session_validation_run(uintptr_t mlkem_base,
         }
     }
 
-    XTime_GetTime(&end);
-    total_us = elapsed_us(begin, end);
     report("install and use every slot 0..63",
            installed == AEAD_HW_MAX_SESSIONS, &failures);
     report("all 64 first TX counters start at zero",
@@ -107,9 +106,10 @@ int pqc_64session_validation_run(uintptr_t mlkem_base,
     report("session IDs produce separated traffic material",
            installed == AEAD_HW_MAX_SESSIONS && distinct_ok, &failures);
 
-    xil_printf("[METRIC] 64 ML-KEM sessions: %lu us total, %lu us average\r\n",
-               (unsigned long)total_us,
-               (unsigned long)(installed == 0u ? 0u : total_us / installed));
+    xil_printf("[METRIC] ML-KEM service: %lu us total, %lu us average\r\n",
+               (unsigned long)kem_total_us,
+               (unsigned long)(installed == 0u
+                               ? 0u : kem_total_us / installed));
 
     if (installed == AEAD_HW_MAX_SESSIONS) {
         counter = UINT64_MAX;
