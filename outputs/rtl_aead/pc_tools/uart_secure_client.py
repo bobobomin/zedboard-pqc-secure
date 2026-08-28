@@ -163,13 +163,9 @@ def board_status(port):
     return count, bitmap
 
 
-def secure_echo(port, sessions, slot, plaintext, verbose=True):
+def build_data_command(state, slot, plaintext):
     if len(plaintext) > PACKET_BYTES:
         raise ValueError("message must be at most 64 UTF-8 bytes")
-    if slot not in range(MAX_SESSIONS) or not sessions[slot]["active"]:
-        raise ValueError("selected slot is not active")
-
-    state = sessions[slot]
     tx_counter = state["tx_counter"]
     padded = plaintext + bytes(PACKET_BYTES - len(plaintext))
     request = ChaCha20Poly1305(state["tx_key"]).encrypt(
@@ -182,6 +178,28 @@ def secure_echo(port, sessions, slot, plaintext, verbose=True):
         f"DATA {slot} {tx_counter:016x} {len(plaintext)} "
         f"{ciphertext.hex()} {tag.hex()}"
     )
+    return command, ciphertext, tag
+
+
+def expect_rejected_packet(port, state, slot, expected_error):
+    command, _, _ = build_data_command(
+        state, slot, b"stale-user-packet"
+    )
+    line = send_line(port, command)
+    if not line.startswith(expected_error):
+        raise RuntimeError(
+            f"expected {expected_error!r} for stale packet, got: {line}"
+        )
+
+
+def secure_echo(port, sessions, slot, plaintext, verbose=True):
+    if len(plaintext) > PACKET_BYTES:
+        raise ValueError("message must be at most 64 UTF-8 bytes")
+    if slot not in range(MAX_SESSIONS) or not sessions[slot]["active"]:
+        raise ValueError("selected slot is not active")
+
+    state = sessions[slot]
+    command, ciphertext, tag = build_data_command(state, slot, plaintext)
 
     begin = time.perf_counter()
     line = send_line(port, command)
@@ -369,13 +387,20 @@ def main():
                 for index in range(count):
                     slots = active_slots(sessions)
                     slot = slots[index % len(slots)]
+                    old_state = sessions[slot].copy()
                     leave_session(port, sessions, slot)
                     leaves += 1
+                    expect_rejected_packet(
+                        port, old_state, slot, "ERR NOSESSION"
+                    )
                     join_session(
                         port, sessions, slot, vectors,
                         next_user_id, join_events
                     )
                     next_user_id += 1
+                    expect_rejected_packet(
+                        port, old_state, slot, "ERR AUTH"
+                    )
                     secure_echo(
                         port, sessions, slot,
                         f"new-user-{next_user_id}".encode("ascii"),
@@ -384,7 +409,7 @@ def main():
                 elapsed = time.perf_counter() - begin
                 new_kem = join_events[kem_begin:]
                 print(
-                    f"[CHURN] {count} leave+join+secure-packet events, "
+                    f"[CHURN] {count} leave+join+stale-reject+secure events, "
                     f"{elapsed:.3f} s, {count / elapsed:.2f} events/s, "
                     f"ML-KEM avg={statistics.mean(new_kem):.1f} us"
                 )
