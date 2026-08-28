@@ -16,17 +16,20 @@ Add these sources to a standalone Cortex-A9 application:
 - `aead_hw.c/.h`
 - `mlkem_decaps_hw.c/.h`
 - `secure_channel_hw.c/.h`
+- `pqc_session_scheduler.c/.h` (required by the Ethernet multi-client demo)
 
 The application performs the following board tests in order:
 
-1. Configure a deterministic AEAD session through AXI-Lite.
-2. Compare hardware ciphertext and Poly1305 tag with the PC golden reference.
-3. Authenticate/decrypt the golden packet and reject a modified tag.
-4. Load the ML-KEM-512 decapsulation key and ciphertext.
-5. Run complete PL decapsulation and atomically install session slot 1.
-6. Decrypt the PC golden packet with the ML-KEM-derived RX key.
-7. Encrypt a ZedBoard response with the direction-separated TX key.
-8. Reject a modified ML-KEM ciphertext.
+1. Load the ML-KEM-512 decapsulation key and ciphertext.
+2. Run complete PL decapsulation and atomically install session slot 1.
+3. Decrypt the PC golden packet with the ML-KEM-derived RX key.
+4. Encrypt a ZedBoard response with the direction-separated TX key.
+5. Reject a modified ML-KEM ciphertext.
+
+The final hardware accepts slots 0 through 63. Direct PS writes of traffic
+keys are intentionally disabled; a session becomes valid only after a
+successful ML-KEM decapsulation. The Ethernet layer owns connection-to-slot
+allocation and feeds ready requests to `pqc_session_scheduler`.
 
 UART is configured by the generated BSP for PS UART 1 at 115200 baud. A
 successful run ends with `ALL PS-PL HARDWARE TESTS PASSED`.

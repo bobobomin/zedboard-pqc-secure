@@ -12,6 +12,7 @@ extern "C" {
 #define AEAD_HW_TAG_BYTES    16u
 #define AEAD_HW_KEY_BYTES    32u
 #define AEAD_HW_PREFIX_BYTES  4u
+#define AEAD_HW_MAX_SESSIONS 64u
 
 typedef struct {
     uintptr_t base_address;
@@ -22,7 +23,8 @@ enum {
     AEAD_HW_OK = 0,
     AEAD_HW_ERR_TIMEOUT = -1,
     AEAD_HW_ERR_AUTH = -2,
-    AEAD_HW_ERR_ARGUMENT = -3
+    AEAD_HW_ERR_ARGUMENT = -3,
+    AEAD_HW_ERR_UNSUPPORTED = -4
 };
 
 void aead_hw_init(aead_hw_t *device, uintptr_t base_address,

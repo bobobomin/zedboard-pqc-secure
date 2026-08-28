@@ -43,8 +43,13 @@ try {
         (Join-Path $Root 'rtl\mlkem_secure_channel_shared_axi_top.sv') `
         (Join-Path $Root 'rtl\mlkem_secure_channel_fault_protected_axi_top.sv') `
         (Join-Path $Root 'rtl\aead_traffic_axi_lite_frontend.sv') `
+        (Join-Path $Root 'rtl\aead_session_manager_bram.sv') `
+        (Join-Path $Root 'rtl\secure_channel_material_bram_core.sv') `
+        (Join-Path $Root 'rtl\mlkem_secure_channel_fault_protected_indexed_axi_top.sv') `
+        (Join-Path $Root 'rtl\aead_traffic_indexed_axi_lite_frontend.sv') `
         (Join-Path $Root 'rtl\mlkem_secure_channel_complete_axi_top.sv') `
         (Join-Path $Root 'tb\tb_aead_arbiter_4session.sv') `
+        (Join-Path $Root 'tb\tb_aead_session_manager_bram.sv') `
         (Join-Path $Root 'tb\tb_aead_axi_lite_wrapper.sv') `
         (Join-Path $Root 'tb\tb_aead_fixed64.sv') `
         (Join-Path $Root 'tb\tb_sha3_shake_stream.sv') `
@@ -83,6 +88,12 @@ try {
 
     & (Join-Path $VivadoBin 'xsim.bat') tb_aead_arbiter_sim -runall
     if ($LASTEXITCODE -ne 0) { throw 'arbiter xsim failed' }
+
+    & (Join-Path $VivadoBin 'xelab.bat') tb_aead_session_manager_bram -s tb_aead_session_bram_sim
+    if ($LASTEXITCODE -ne 0) { throw '64-session manager xelab failed' }
+
+    & (Join-Path $VivadoBin 'xsim.bat') tb_aead_session_bram_sim -runall
+    if ($LASTEXITCODE -ne 0) { throw '64-session manager xsim failed' }
 
     & (Join-Path $VivadoBin 'xelab.bat') tb_aead_axi_lite_wrapper -s tb_aead_axi_sim
     if ($LASTEXITCODE -ne 0) { throw 'AXI xelab failed' }

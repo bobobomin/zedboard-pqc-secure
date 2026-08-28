@@ -4,6 +4,7 @@
 #include <stddef.h>
 #define MLKEM512_SECRET_KEY_BYTES 1632u
 #define MLKEM512_CIPHERTEXT_BYTES 768u
+#define MLKEM_HW_MAX_SESSIONS 64u
 typedef struct { uintptr_t base; uint32_t poll_limit; } mlkem_decaps_hw_t;
 enum { MLKEM_HW_OK=0, MLKEM_HW_TIMEOUT=-1, MLKEM_HW_ARGUMENT=-2,
        MLKEM_HW_REJECTED=-3 };

@@ -1,7 +1,7 @@
 {
    "ActiveEmotionalView":"Default View",
    "Default View_ScaleFactor":"0.669151",
-   "Default View_TopLeft":"-169,-1072",
+   "Default View_TopLeft":"-345,-1061",
    "ExpandedHierarchyInLayout":"",
    "guistr":"# # String gsaved with Nlview 7.0r6  2020-01-29 bk=1.5227 VDI=41 GEI=36 GUI=JA:10.0 non-TLS
 #  -string -flagsOSRD
@@ -19,8 +19,8 @@ preplace netloc xlconstant_0_dout 1 1 1 N -510
 preplace netloc processing_system7_0_FIXED_IO 1 3 3 NJ -290 N -290 N
 preplace netloc processing_system7_0_M_AXI_GP0 1 3 2 740 -590 NJ
 preplace netloc ps7_0_axi_periph_M01_AXI 1 1 5 20 -450 340J -520 NJ -520 1120J -370 1430
-preplace netloc ps7_0_axi_periph_M00_AXI 1 1 5 0 -370 NJ -370 750J -300 NJ -300 1440
 preplace netloc processing_system7_0_DDR 1 3 3 NJ -310 N -310 N
+preplace netloc ps7_0_axi_periph_M00_AXI 1 1 5 0 -370 NJ -370 750J -300 NJ -300 1440
 levelinfo -pg 1 -170 -80 190 540 940 1280 1460
 pagesize -pg 1 -db -bbox -sgen -170 -790 1580 200
 "

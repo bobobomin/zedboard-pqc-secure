@@ -21,11 +21,11 @@ Zynq PL
     |- ML-KEM-512 decapsulation
     |- shared SHA3/SHAKE (Keccak)
     |- ChaCha20-Poly1305
-    |- 4-session table / round-robin arbiter
+    |- 64-session BRAM table / indexed request port
     `- fault detection / fail-closed protection
 ```
 
-현재 RTL은 **4개의 논리 세션**을 지원하며 암호 연산 엔진 하나를 공유합니다. 32/64세션 확장은 아직 구현되지 않았으며, 향후 BRAM 기반 indexed session table과 PS 요청 큐 구조로 확장할 계획입니다.
+현재 RTL은 **64개의 논리 세션**을 지원하며 암호 연산 엔진 하나를 공유합니다. 세션 상태는 PL의 BRAM에 저장하고, 요청 순서는 PS의 준비 비트맵 기반 round-robin 스케줄러가 결정합니다. 기존 4세션 RTL은 회귀 비교용으로 남겨 두었습니다.
 
 ## 구현된 기능
 
@@ -40,7 +40,8 @@ Zynq PL
 - ChaCha20-Poly1305 고정 64-byte AEAD 패킷 처리
 - 세션별 TX/RX key, nonce prefix, packet counter 분리
 - Poly1305 인증 실패 시 plaintext 차단
-- 4개 세션 round-robin 처리
+- 64개 세션 BRAM 저장 및 6-bit indexed slot 처리
+- PS용 64세션 event-driven round-robin 스케줄러
 - AXI4-Lite 기반 PS-PL 제어
 - ciphertext, counter, session key 및 출력 제어 경로 fault protection
 
@@ -69,22 +70,33 @@ BaseMul을 다중 사이클화하고 NTT/INTT의 Montgomery/Barrett 연산을 �
 |---|---:|---:|---:|
 | 최초 구현 | -15.607 ns | -2554.274 ns | 1460 |
 | BaseMul 수정 후 | -1.611 ns | -74.895 ns | 64 |
-| NTT/INTT 수정 후 | **+0.215 ns** | **0 ns** | **0** |
+| NTT/INTT 수정 후(4세션) | +0.215 ns | 0 ns | 0 |
+| **64세션 BRAM 구조** | **+0.282 ns** | **0 ns** | **0** |
 
-최종 post-route 결과는 50 MHz timing constraint를 만족합니다. Hold slack은 `+0.014 ns`이며 routing error는 0개입니다.
+64세션 설계는 Vivado 2020.2에서 전체 합성·구현·배선을 완료했으며 50 MHz timing constraint를 만족합니다. Hold slack은 `+0.015 ns`, THS는 `0 ns`, setup/hold 실패 endpoint와 routing error는 모두 0개입니다.
 
-### XC7Z020 post-implementation 자원 사용량
+### XC7Z020 64세션 post-synthesis 결과
 
 | Resource | Used | Available | Utilization |
 |---|---:|---:|---:|
-| LUT | 35,847 | 53,200 | 67.38% |
+| Slice LUT | 29,598 | 53,200 | 55.64% |
+| Slice Register | 26,158 | 106,400 | 24.58% |
+| BRAM Tile | 9 | 140 | 6.43% |
+
+### XC7Z020 64세션 post-implementation 결과
+
+| Resource | Used | Available | Utilization |
+|---|---:|---:|---:|
+| LUT | 29,777 | 53,200 | 55.97% |
 | LUTRAM | 62 | 17,400 | 0.36% |
-| FF | 29,803 | 106,400 | 28.01% |
-| BRAM | 7 | 140 | 5.00% |
+| FF | 26,845 | 106,400 | 25.23% |
+| BRAM | 9 | 140 | 6.43% |
 | DSP | 61 | 220 | 27.73% |
 | BUFG | 2 | 32 | 6.25% |
 
 Vivado methodology report에는 DSP/BRAM 파이프라인 관련 warning이 남아 있지만, 구현·배선·timing을 막는 error 또는 critical warning은 확인되지 않았습니다.
+
+64세션 테이블은 `1,536 x 32-bit` 상태 메모리로 구성되며 `RAMB36E1 2개`로 추론되었습니다. 기존 4세션 대비 전체 LUT는 35,847개에서 29,777개로, FF는 29,803개에서 26,845개로 감소했고 BRAM Tile은 7개에서 9개로 증가했습니다.
 
 ## 디렉터리
 
@@ -147,9 +159,9 @@ Bring-up 통과 후 다음 소프트웨어를 추가해야 합니다.
 - 공개키 fingerprint 사전 등록 및 검증
 - handshake와 고정 64-byte packet protocol
 - `session_id`, counter, timeout 및 오류 처리
-- 먼저 PC 클라이언트 1개로 검증한 뒤 현재 RTL 한도인 4개 세션으로 확장
+- 먼저 PC 클라이언트 1개로 검증한 뒤 64개 논리 세션으로 확장
 
-32/64명 최종 데모를 진행하려면 별도 단계에서 session slot 폭을 5/6비트로 확장하고, FF 기반 4세션 테이블을 BRAM 기반 indexed table로 변경한 뒤 PS 연결 관리와 요청 큐를 추가해야 합니다.
+64명 데모용 RTL과 기본 PS 스케줄러는 준비되었습니다. 실제 데모에는 lwIP 연결별 slot 할당/회수, Ethernet RX 큐, timeout 및 연결 종료 시 세션 폐기 정책을 추가해야 합니다.
 
 ## 주의
 

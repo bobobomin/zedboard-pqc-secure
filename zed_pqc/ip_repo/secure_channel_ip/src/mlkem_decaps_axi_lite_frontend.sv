@@ -2,7 +2,8 @@
 
 /* DMA-free AXI4-Lite loader/control front-end for the PL Decaps engine. */
 module mlkem_decaps_axi_lite_frontend #(
-    parameter integer C_S_AXI_ADDR_WIDTH=8
+    parameter integer C_S_AXI_ADDR_WIDTH=8,
+    parameter integer SLOT_WIDTH=2
 )(
     input logic s_axi_aclk,input logic s_axi_aresetn,
     input logic[C_S_AXI_ADDR_WIDTH-1:0]s_axi_awaddr,input logic s_axi_awvalid,
@@ -12,7 +13,7 @@ module mlkem_decaps_axi_lite_frontend #(
     input logic[C_S_AXI_ADDR_WIDTH-1:0]s_axi_araddr,input logic s_axi_arvalid,
     output logic s_axi_arready,output logic[31:0]s_axi_rdata,output logic[1:0]s_axi_rresp,
     output logic s_axi_rvalid,input logic s_axi_rready,
-    output logic decap_start_o,output logic[1:0]decap_slot_o,
+    output logic decap_start_o,output logic[SLOT_WIDTH-1:0]decap_slot_o,
     output logic[31:0]decap_session_id_o,input logic decap_busy_i,
     input logic decap_done_i,input logic decap_fail_i,
     input logic sk_we_i,input logic[8:0]sk_addr_i,input logic[31:0]sk_wdata_i,
@@ -54,7 +55,7 @@ module mlkem_decaps_axi_lite_frontend #(
                         if(wdata_q[8])begin done_latched<=0;fail_latched<=0;end
                         if(wdata_q[0]&&!decap_busy_i)decap_start_o<=1;
                     end
-                    REG_SLOT:decap_slot_o<=wdata_q[1:0];
+                    REG_SLOT:decap_slot_o<=wdata_q[SLOT_WIDTH-1:0];
                     REG_SESSION:decap_session_id_o<=wdata_q;
                     REG_MEM_REGION:region<=wdata_q[1:0];
                     REG_MEM_ADDR:mem_addr<=wdata_q[11:0];
@@ -70,7 +71,7 @@ module mlkem_decaps_axi_lite_frontend #(
                     REG_VERSION:begin s_axi_rdata<=32'h0002_0000;s_axi_rvalid<=1;end
                     REG_STATUS:begin s_axi_rdata<={28'd0,fail_latched,done_latched,
                                                    decap_busy_i,read_mem_pending};s_axi_rvalid<=1;end
-                    REG_SLOT:begin s_axi_rdata<={30'd0,decap_slot_o};s_axi_rvalid<=1;end
+                    REG_SLOT:begin s_axi_rdata<={{(32-SLOT_WIDTH){1'b0}},decap_slot_o};s_axi_rvalid<=1;end
                     REG_SESSION:begin s_axi_rdata<=decap_session_id_o;s_axi_rvalid<=1;end
                     REG_MEM_REGION:begin s_axi_rdata<={30'd0,region};s_axi_rvalid<=1;end
                     REG_MEM_ADDR:begin s_axi_rdata<={20'd0,mem_addr};s_axi_rvalid<=1;end
