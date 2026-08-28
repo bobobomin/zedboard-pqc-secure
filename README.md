@@ -173,7 +173,13 @@ ALL PS-PL HARDWARE TESTS PASSED
 
 Bring-up은 AEAD 골든 결과 비교, 정상 복호화, tag 변조 거부, ML-KEM decapsulation, 세션 설치, ML-KEM ciphertext 변조 거부를 검사합니다.
 
-### 3. 실제 Ethernet 데모
+추가 보드 검증에서는 4개 session slot의 독립성, TX/RX counter 증가, replay 및 skipped-counter 거부, 인증 실패 시 counter 유지, 0/1/63/64-byte 경계 처리와 65-byte/잘못된 slot 거부를 확인했습니다. 별도 XSim testbench에서는 4개 동시 요청의 `0 -> 1 -> 2 -> 3` round-robin 순서, inactive slot 건너뛰기 및 지속 경쟁 시 starvation 부재를 확인했습니다.
+
+### 3. UART 보안 통신 데모
+
+Ethernet 없이 `outputs/rtl_aead/pc_tools/uart_secure_client.py`로 4개의 논리 사용자를 열어 ChaCha20-Poly1305 양방향 secure echo를 실행할 수 있습니다. `/round N`은 네 사용자를 순환하며 패킷 수, ML-KEM session 수립 시간, PL RX/TX 시간 및 PC UART RTT를 출력합니다. 현재 UART frontend는 요청을 직렬화하므로 실제 동시 요청의 arbiter 검증을 대체하지 않습니다.
+
+### 4. 실제 Ethernet 데모
 
 Bring-up 통과 후 다음 소프트웨어를 추가해야 합니다.
 
@@ -186,9 +192,11 @@ Bring-up 통과 후 다음 소프트웨어를 추가해야 합니다.
 
 32/64명 최종 데모를 진행하려면 별도 단계에서 session slot 폭을 5/6비트로 확장하고, FF 기반 4세션 테이블을 BRAM 기반 indexed table로 변경한 뒤 PS 연결 관리와 요청 큐를 추가해야 합니다.
 
-## 추가 검증 계획
+## 검증 현황 및 남은 계획
 
 ### 1. 보드 기반 다중 세션 검증
+
+**완료:** 4개 slot 독립성, session별 key/context 격리, 독립 counter 및 순차 UART round 측정. Round-robin 동시 경쟁은 확장 XSim testbench에서 완료.
 
 - slot 0~3에 서로 다른 key, nonce prefix 및 session ID 설치
 - 4개 요청을 동시에 유지하여 round-robin 처리 순서 확인
@@ -199,6 +207,8 @@ Bring-up 통과 후 다음 소프트웨어를 추가해야 합니다.
 
 ### 2. Counter 및 replay 방지 검증
 
+**완료:** counter `0 -> 1 -> 2`, replay/skipped counter 거부, 인증 실패 시 counter 유지, session 재설치 시 초기화.
+
 - 동일 세션의 연속 패킷에서 counter `0 -> 1 -> 2` 확인
 - 각 counter의 암호문과 tag를 PC golden vector와 비교
 - 이전 counter 재전송과 중복 패킷 거부
@@ -207,6 +217,8 @@ Bring-up 통과 후 다음 소프트웨어를 추가해야 합니다.
 - 세션 재설치·무효화 시 key와 counter 초기화 확인
 
 ### 3. 경계값 및 오류 복구 검증
+
+**부분 완료:** 0/1/63/64-byte 처리와 65-byte 및 invalid slot 거부 완료. reset 중단 복구와 장시간 반복 시험은 남아 있습니다.
 
 - 길이 0, 1, 63, 64-byte 패킷 처리
 - 64-byte 초과 요청 거부
@@ -227,6 +239,16 @@ Bring-up 통과 후 다음 소프트웨어를 추가해야 합니다.
 
 ### 5. 성능 및 보안 평가
 
+ZedBoard Release(`-O2`) 실측 결과:
+
+| 연산 | Cortex-A9 software | FPGA service | 비고 |
+|---|---:|---:|---|
+| ML-KEM-512 decapsulation/session | 1,258.523 us | 2,812 us | HW는 AXI 전송, KDF, session 설치 포함 |
+| ChaCha20-Poly1305 encrypt 64B | 6.723 us | 19.0 us | HW는 AXI-Lite service 시간 |
+| ChaCha20-Poly1305 decrypt 64B | 6.886 us | 19.0 us | HW는 AXI-Lite service 시간 |
+
+4사용자 200패킷 UART round에서는 payload throughput `430.2 byte/s`, 평균 RTT 약 `34.35 ms`가 측정됐습니다. UART/text/hex 직렬화가 end-to-end 병목이며, 현재 50 MHz AXI-Lite 구현은 Cortex-A9 software보다 낮은 실제 처리량을 보였습니다. 성능 개선에는 AXI-Stream/DMA, batching, PL 내부 buffering 및 clock 최적화가 필요합니다.
+
 - ML-KEM decapsulation cycle 수와 latency
 - AEAD encrypt/decrypt latency와 throughput
 - 4클라이언트별 평균·최대 대기시간
@@ -235,4 +257,4 @@ Bring-up 통과 후 다음 소프트웨어를 추가해야 합니다.
 - timing/power side-channel 및 fault 공격 별도 평가
 ## 주의
 
-이 저장소는 연구·교육용 프로토타입입니다. 기능 시뮬레이션, 50 MHz 구현 timing 및 단일 세션 PS-PL 보드 bring-up은 통과했지만 다중 세션, Ethernet 상호운용성, 장시간 안정성, side-channel 평가 및 제품 수준의 보안 검증은 아직 완료되지 않았습니다. 실제 서비스용 암호 시스템으로 사용하면 안 됩니다.
+이 저장소는 연구·교육용 프로토타입입니다. 기능 시뮬레이션, 50 MHz 구현 timing, PS-PL 통합, 4개 논리 세션의 독립성/counter/경계값 및 UART secure echo는 통과했지만 실제 동시 PS 요청, Ethernet 상호운용성, 장시간 안정성, side-channel 평가 및 제품 수준의 보안 검증은 아직 완료되지 않았습니다. 실제 서비스용 암호 시스템으로 사용하면 안 됩니다.
