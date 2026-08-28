@@ -111,26 +111,32 @@ int pqc_64session_validation_run(uintptr_t mlkem_base,
                (unsigned long)total_us,
                (unsigned long)(installed == 0u ? 0u : total_us / installed));
 
-    counter = UINT64_MAX;
-    result = secure_channel_hw_encrypt(
-        &device, 0u, probe, (uint8_t)(sizeof(probe) - 1u),
-        ciphertext, tag, &counter);
-    report("slot 0 retains its independent TX counter",
-           result == AEAD_HW_OK && counter == 1u, &failures);
-
-    result = secure_channel_hw_establish_session(
-        &device, zed_kat_kem_ciphertext, 63u, 0x6500003fu);
-    counter = UINT64_MAX;
-    if (result == MLKEM_HW_OK)
+    if (installed == AEAD_HW_MAX_SESSIONS) {
+        counter = UINT64_MAX;
         result = secure_channel_hw_encrypt(
-            &device, 63u, probe, (uint8_t)(sizeof(probe) - 1u),
+            &device, 0u, probe, (uint8_t)(sizeof(probe) - 1u),
             ciphertext, tag, &counter);
-    report("new user overwrites reused slot and resets its counter",
-           result == AEAD_HW_OK && counter == 0u
-           && (bytes_differ(ciphertext, old_slot63_ciphertext,
-                            AEAD_HW_PACKET_BYTES)
-               || bytes_differ(tag, old_slot63_tag, AEAD_HW_TAG_BYTES)),
-           &failures);
+        report("slot 0 retains its independent TX counter",
+               result == AEAD_HW_OK && counter == 1u, &failures);
+
+        result = secure_channel_hw_establish_session(
+            &device, zed_kat_kem_ciphertext, 63u, 0x6500003fu);
+        counter = UINT64_MAX;
+        if (result == MLKEM_HW_OK)
+            result = secure_channel_hw_encrypt(
+                &device, 63u, probe, (uint8_t)(sizeof(probe) - 1u),
+                ciphertext, tag, &counter);
+        report("new user overwrites reused slot and resets its counter",
+               result == AEAD_HW_OK && counter == 0u
+               && (bytes_differ(ciphertext, old_slot63_ciphertext,
+                                AEAD_HW_PACKET_BYTES)
+                   || bytes_differ(tag, old_slot63_tag, AEAD_HW_TAG_BYTES)),
+               &failures);
+    } else {
+        report("slot 0 retains its independent TX counter", 0, &failures);
+        report("new user overwrites reused slot and resets its counter",
+               0, &failures);
+    }
 
     result = secure_channel_hw_encrypt(
         &device, 64u, probe, (uint8_t)(sizeof(probe) - 1u),
