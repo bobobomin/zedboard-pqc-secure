@@ -96,7 +96,55 @@ BaseMul을 다중 사이클화하고 NTT/INTT의 Montgomery/Barrett 연산을 �
 
 Vivado methodology report에는 DSP/BRAM 파이프라인 관련 warning이 남아 있지만, 구현·배선·timing을 막는 error 또는 critical warning은 확인되지 않았습니다.
 
-64세션 테이블은 `1,536 x 32-bit` 상태 메모리로 구성되며 `RAMB36E1 2개`로 추론되었습니다. 기존 4세션 대비 전체 LUT는 35,847개에서 29,777개로, FF는 29,803개에서 26,845개로 감소했고 BRAM Tile은 7개에서 9개로 증가했습니다.
+64세션 테이블은 `1,536 × 32-bit` 상태 메모리로 구성되며 `RAMB36E1 2개`로 추론되었다. 기존 4세션 대비 LUT와 FF 사용량을 줄이면서 64세션 동시 처리를 지원한다.
+
+## 64세션 통합본 합성·구현 결과
+
+PR #2 타이밍 파이프라인과 후속 사이클 최적화를 반영한 64세션 ML-KEM Secure Channel 설계의 Vivado 검증 결과이다.
+
+### 검증 결과
+
+| 항목 | 결과 |
+|---|---:|
+| 전체 ML-KEM decapsulation 테스트 | PASS |
+| 총 decapsulation 지연 | 104,245 cycles |
+| CORE decapsulation | 97,364 cycles |
+| 목표 클록 | 50 MHz |
+| 타이밍 제약 | 모두 만족 |
+
+### 구현 후 자원 사용량
+
+| 자원 | 사용량 |
+|---|---:|
+| LUT | 29,876 |
+| FF | 27,045 |
+| BRAM | 9 |
+| DSP | 59 |
+
+### 타이밍 요약
+
+| 항목 | 결과 |
+|---|---:|
+| WNS | +0.612 ns |
+| TNS | 0.000 ns |
+| WHS | +0.019 ns |
+| 설정 주파수 | 50 MHz (20 ns period) |
+| 타이밍 상태 | PASS |
+
+### 주요 최악 경로
+
+| 우선순위 | 경로/블록 | 지연 |
+|---:|---|---:|
+| 1 | Poly1305 accumulation | 18.800 ns |
+| 2 | SHA3/Hash | 16.447 ns |
+| 3 | POLY→MESSAGE | 17.272 ns |
+| 4 | Public-key unpack | 14.728 ns |
+| 5 | Pack/Compare | 11.992 ns |
+| 6 | Poly bridge | 11.720 ns |
+| 7 | ML-KEM Poly Add/Sub | 9.913 ns |
+| 8 | ML-KEM BaseMul | 약 7.6 ns |
+
+PR #2의 Barrett reduction 및 BaseMul 파이프라인과 후속 데이터 이동 최적화를 적용한 결과, 총 decapsulation 지연이 148,093 cycles에서 104,245 cycles로 감소했다. 50 MHz 구현 타이밍은 만족하며, 100 MHz 목표에서는 Poly1305와 SHA3/Hash 경로를 우선적으로 최적화한다.
 
 ## 디렉터리
 
