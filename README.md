@@ -219,6 +219,50 @@ BaseMul을 다중 사이클화하고 NTT/INTT의 Montgomery/Barrett 연산을 �
 
 Vivado methodology report에는 DSP/BRAM 파이프라인 관련 warning이 남아 있지만, 구현·배선·timing을 막는 error 또는 critical warning은 확인되지 않았습니다.
 
+
+## 64세션 통합본 합성·구현 결과
+
+64세션 ML-KEM Secure Channel 설계에 PR #2 타이밍 파이프라인 수정을 반영한 뒤, Vivado 합성 및 구현을 수행하였다.
+
+### 검증 결과
+
+| 항목 | 결과 |
+|---|---:|
+| 전체 ML-KEM decapsulation 테스트 | PASS |
+| 총 decapsulation 지연 | 148,093 cycles |
+| 목표 클록 | 50 MHz |
+| 타이밍 제약 | 모두 만족 |
+
+### 구현 후 자원 사용량
+
+| 자원 | 사용량 |
+|---|---:|
+| LUT | 29,812 |
+| FF | 27,058 |
+| BRAM | 9 |
+| DSP | 59 |
+
+### 타이밍 요약
+
+| 항목 | 결과 |
+|---|---:|
+| WNS | +0.606 ns |
+| TNS | 0.000 ns |
+| WHS | +0.010 ns |
+| 설정 주파수 | 50 MHz (20 ns period) |
+| 타이밍 상태 | PASS |
+
+### 주요 최악 경로 분석
+
+| 우선순위 | 경로/블록 | 지연 또는 특성 | 분석 |
+|---:|---|---:|---|
+| 1 | Poly1305 accumulation | 19.084 ns | 현재 전체 최악 경로. `d_acc_reg[0][27] → h_limb_reg[1][21]` 경로이며, 논리 단계 51개와 CARRY4 43개가 집중되어 있음 |
+| 2 | SHA3/Hash 경로 | 약 16.110 ns | Poly1305 다음 병목 경로. 100 MHz 목표에서는 추가 파이프라인 검토 필요 |
+| 3 | ML-KEM Poly Add/Sub | 약 12.163 ns, 논리 단계 10 | PR #2의 Barrett reduction 파이프라인 적용 후 크게 개선됨 |
+| 4 | ML-KEM BaseMul | 약 7.618 ns | PR #2의 BaseMul 파이프라인 적용 후 100 MHz 기준에도 비교적 여유가 있는 경로 |
+
+PR #2 적용으로 ML-KEM Poly Add/Sub 및 BaseMul 경로는 개선되었으며, 50 MHz에서 모든 타이밍 제약을 만족한다. 다음 100 MHz 최적화 단계의 최우선 대상은 Poly1305 accumulation 경로이고, 그 다음은 SHA3/Hash 경로이다.
+
 ## 디렉터리
 
 - `outputs/golden_reference`: PC용 C golden reference와 테스트 벡터
