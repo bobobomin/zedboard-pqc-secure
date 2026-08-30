@@ -32,7 +32,9 @@ module mlkem_poly_accelerator (
                               INTT_READ, INTT_PREP, INTT_MUL,
                               INTT_MONT, INTT_REDUCE, INTT_WRITE,
                               BASEMUL_READ, BASEMUL_MUL,
-                              BASEMUL_ZETA, BASEMUL_WRITE} state_t;
+                              BASEMUL_MONT, BASEMUL_REDUCE,
+                              BASEMUL_ZMUL, BASEMUL_ZMONT,
+                              BASEMUL_ZREDUCE, BASEMUL_WRITE} state_t;
     state_t state;
 
     (* ram_style="block" *) logic signed [15:0] bank_a[0:255];
@@ -44,16 +46,26 @@ module mlkem_poly_accelerator (
     logic [7:0] a_addr0,a_addr1,b_addr0,b_addr1,r_addr0,r_addr1;
     logic signed [15:0] a_din0,a_din1,b_din0,b_din1,r_din0,r_din1;
     logic signed [15:0] a_dout0,a_dout1,b_dout0,b_dout1,r_dout0,r_dout1;
-    /* Break the nested Montgomery products across clock boundaries so the
-     * BaseMul BRAM-to-BRAM path never contains two fqmul chains in series. */
+    /* Break every Montgomery product across clock boundaries so the BaseMul
+     * BRAM-to-BRAM path holds one multiply per stage, as NTT/INTT already do.
+     * The four coefficient products share the MUL/MONT/REDUCE stages; the
+     * trailing zeta multiply reuses the p11 product and multiplier registers
+     * because they are free once BASEMUL_REDUCE has latched its result. */
+    logic signed [31:0] basemul_prod11_reg, basemul_prod00_reg;
+    logic signed [31:0] basemul_prod01_reg, basemul_prod10_reg;
+    logic signed [15:0] basemul_mult11_reg, basemul_mult00_reg;
+    logic signed [15:0] basemul_mult01_reg, basemul_mult10_reg;
     logic signed [15:0] basemul_p11_reg, basemul_p00_reg;
     logic signed [15:0] basemul_p01_reg, basemul_p10_reg;
     logic signed [15:0] basemul_p11z_reg;
+    /* The zeta ROM read and its conditional negation are registered a stage
+     * early so BASEMUL_ZMUL drives the multiplier from registers only. */
+    logic signed [15:0] basemul_zeta_reg;
 
-    /* NTT/INTT arithmetic pipeline.  A combinational fqmul contains three
-     * dependent multiplies (coefficient product and the two Montgomery
-     * reduction multiplies).  Keep one multiply per clock stage so the
-     * BRAM-to-BRAM butterfly path can meet the ZedBoard clock constraint. */
+    /* NTT/INTT arithmetic pipeline.  One Montgomery reduction contains three
+     * dependent multiplies (coefficient product and the two reduction
+     * multiplies).  Keep one multiply per clock stage so the BRAM-to-BRAM
+     * butterfly path can meet the ZedBoard clock constraint. */
     logic signed [15:0] butterfly_a_reg;
     logic signed [15:0] intt_sum_reg, intt_diff_reg;
     logic signed [31:0] fq_product_reg;
@@ -62,34 +74,9 @@ module mlkem_poly_accelerator (
     logic signed [31:0] barrett_accum_reg, barrett_temp_reg;
     logic signed [15:0] barrett_result_reg;
 
-    function automatic logic signed [15:0] montgomery_reduce(
-        input logic signed [31:0] value);
-        logic [15:0] product_low;
-        logic signed [15:0] multiplier;
-        logic signed [31:0] reduced;
-        begin
-            product_low = value[15:0] * 16'd62209;
-            multiplier = $signed(product_low);
-            reduced = value - multiplier * 32'sd3329;
-            montgomery_reduce = reduced >>> 16;
-        end
-    endfunction
-
-    function automatic logic signed [15:0] fqmul(
-        input logic signed [15:0] left,
-        input logic signed [15:0] right);
-        logic signed [31:0] product;
-        begin product = left * right; fqmul = montgomery_reduce(product); end
-    endfunction
-
-    function automatic logic signed [15:0] barrett_reduce(
-        input logic signed [15:0] value);
-        logic signed [31:0] temp;
-        begin
-            temp = (32'sd20159 * value + 32'sd33554432) >>> 26;
-            barrett_reduce = value - temp * 32'sd3329;
-        end
-    endfunction
+    /* The scalar helpers that chained three multiplies in one expression were
+     * removed with the BaseMul split; every multiply now sits in its own FSM
+     * stage.  Reintroducing them would restore the failing path. */
 
     initial begin
         zetas[0]=-1044; zetas[1]=-758; zetas[2]=-359; zetas[3]=-1517;
@@ -199,8 +186,13 @@ module mlkem_poly_accelerator (
         if (!rst_ni) begin
             state<=IDLE; busy_o<=0; done_o<=0; layer<=0; span<=0;
             block_start<=0; butterfly<=0; zeta_index<=0; pair_index<=0;
+            basemul_prod11_reg<=0;basemul_prod00_reg<=0;
+            basemul_prod01_reg<=0;basemul_prod10_reg<=0;
+            basemul_mult11_reg<=0;basemul_mult00_reg<=0;
+            basemul_mult01_reg<=0;basemul_mult10_reg<=0;
             basemul_p11_reg<=0;basemul_p00_reg<=0;
             basemul_p01_reg<=0;basemul_p10_reg<=0;basemul_p11z_reg<=0;
+            basemul_zeta_reg<=0;
             butterfly_a_reg<=0;intt_sum_reg<=0;intt_diff_reg<=0;
             fq_product_reg<=0;mont_multiplier_reg<=0;fq_result_reg<=0;
             barrett_accum_reg<=0;barrett_temp_reg<=0;barrett_result_reg<=0;
@@ -302,15 +294,43 @@ module mlkem_poly_accelerator (
 
                 BASEMUL_READ:state<=BASEMUL_MUL;
                 BASEMUL_MUL:begin
-                    basemul_p11_reg<=fqmul(a_dout1,b_dout1);
-                    basemul_p00_reg<=fqmul(a_dout0,b_dout0);
-                    basemul_p01_reg<=fqmul(a_dout0,b_dout1);
-                    basemul_p10_reg<=fqmul(a_dout1,b_dout0);
-                    state<=BASEMUL_ZETA;
+                    basemul_prod11_reg<=a_dout1*b_dout1;
+                    basemul_prod00_reg<=a_dout0*b_dout0;
+                    basemul_prod01_reg<=a_dout0*b_dout1;
+                    basemul_prod10_reg<=a_dout1*b_dout0;
+                    basemul_zeta_reg<=pair_index[0]
+                        ? -zetas[64+(pair_index>>1)]:zetas[64+(pair_index>>1)];
+                    state<=BASEMUL_MONT;
                 end
-                BASEMUL_ZETA:begin
-                    basemul_p11z_reg<=fqmul(basemul_p11_reg,pair_index[0]
-                        ? -zetas[64+(pair_index>>1)]:zetas[64+(pair_index>>1)]);
+                BASEMUL_MONT:begin
+                    basemul_mult11_reg<=basemul_prod11_reg[15:0]*16'd62209;
+                    basemul_mult00_reg<=basemul_prod00_reg[15:0]*16'd62209;
+                    basemul_mult01_reg<=basemul_prod01_reg[15:0]*16'd62209;
+                    basemul_mult10_reg<=basemul_prod10_reg[15:0]*16'd62209;
+                    state<=BASEMUL_REDUCE;
+                end
+                BASEMUL_REDUCE:begin
+                    basemul_p11_reg<=(basemul_prod11_reg-
+                        basemul_mult11_reg*32'sd3329)>>>16;
+                    basemul_p00_reg<=(basemul_prod00_reg-
+                        basemul_mult00_reg*32'sd3329)>>>16;
+                    basemul_p01_reg<=(basemul_prod01_reg-
+                        basemul_mult01_reg*32'sd3329)>>>16;
+                    basemul_p10_reg<=(basemul_prod10_reg-
+                        basemul_mult10_reg*32'sd3329)>>>16;
+                    state<=BASEMUL_ZMUL;
+                end
+                BASEMUL_ZMUL:begin
+                    basemul_prod11_reg<=basemul_p11_reg*basemul_zeta_reg;
+                    state<=BASEMUL_ZMONT;
+                end
+                BASEMUL_ZMONT:begin
+                    basemul_mult11_reg<=basemul_prod11_reg[15:0]*16'd62209;
+                    state<=BASEMUL_ZREDUCE;
+                end
+                BASEMUL_ZREDUCE:begin
+                    basemul_p11z_reg<=(basemul_prod11_reg-
+                        basemul_mult11_reg*32'sd3329)>>>16;
                     state<=BASEMUL_WRITE;
                 end
                 BASEMUL_WRITE: begin
