@@ -4,9 +4,9 @@ module mlkem_poly_addsub_controller(
     input logic[3:0]src_a_slot_i,input logic[3:0]src_b_slot_i,input logic[3:0]dst_slot_i,
     output logic busy_o,output logic done_o,output logic poly_we_o,
     output logic[11:0]poly_addr_o,output logic[15:0]poly_wdata_o,input logic[15:0]poly_rdata_i);
-    typedef enum logic[3:0]{IDLE,AR,AW,AC,BR,BW,BC,WRITE,DONE}st_t;st_t state;
+    typedef enum logic[3:0]{IDLE,AR,AW,AC,BR,BW,BC,RED0,RED1,RED2,WRITE,DONE}st_t;st_t state;
     integer index;logic[3:0]sa,sb,sd;logic sub;logic signed[15:0]left,right;logic[15:0]result;
-    mlkem_coeff_addsub u(left,right,sub,result);
+    mlkem_coeff_addsub u(clk_i,rst_ni,left,right,sub,result);
     always_comb begin busy_o=state!=IDLE;done_o=state==DONE;poly_we_o=state==WRITE;
         poly_wdata_o=result;if(state==AR||state==AW||state==AC)poly_addr_o=sa*256+index;
         else if(state==BR||state==BW||state==BC)poly_addr_o=sb*256+index;
@@ -17,7 +17,8 @@ module mlkem_poly_addsub_controller(
             IDLE:if(start_i)begin sa<=src_a_slot_i;sb<=src_b_slot_i;sd<=dst_slot_i;
                 sub<=subtract_i;index<=0;state<=AR;end
             AR:state<=AW;AW:state<=AC;AC:begin left<=poly_rdata_i;state<=BR;end
-            BR:state<=BW;BW:state<=BC;BC:begin right<=poly_rdata_i;state<=WRITE;end
+            BR:state<=BW;BW:state<=BC;BC:begin right<=poly_rdata_i;state<=RED0;end
+            RED0:state<=RED1;RED1:state<=RED2;RED2:state<=WRITE;
             WRITE:if(index==255)state<=DONE;else begin index<=index+1;state<=AR;end
             DONE:state<=IDLE;default:state<=IDLE;
         endcase
