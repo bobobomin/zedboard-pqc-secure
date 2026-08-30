@@ -25,8 +25,19 @@ module mlkem_rejection_pair(input logic[23:0]bytes_i,
         valid0_o=value0_o<12'd3329;valid1_o=value1_o<12'd3329;end
 endmodule
 
-module mlkem_coeff_addsub(input logic signed[15:0]a_i,input logic signed[15:0]b_i,
+module mlkem_coeff_addsub(input logic clk_i,input logic rst_ni,
+    input logic signed[15:0]a_i,input logic signed[15:0]b_i,
     input logic subtract_i,output logic[15:0]canonical_o);
-    logic signed[17:0]x;always_comb begin x=subtract_i?a_i-b_i:a_i+b_i;
-        x=x%18'sd3329;if(x<0)x=x+18'sd3329;canonical_o=x[15:0];end
+    logic signed[17:0]sum_reg,sum_delay_reg;logic signed[7:0]quotient_reg;
+    logic signed[19:0]remainder_reg,x;
+    always_ff @(posedge clk_i or negedge rst_ni)begin
+        if(!rst_ni)begin sum_reg<=0;sum_delay_reg<=0;quotient_reg<=0;remainder_reg<=0;end
+        else begin
+            sum_reg<=subtract_i?a_i-b_i:a_i+b_i;
+            sum_delay_reg<=sum_reg;
+            quotient_reg<=(34'sd20159*sum_reg+34'sd33554432)>>>26;
+            remainder_reg<=sum_delay_reg-quotient_reg*20'sd3329;
+        end
+    end
+    always_comb begin x=remainder_reg;if(x<0)x=x+20'sd3329;canonical_o=x[15:0];end
 endmodule
