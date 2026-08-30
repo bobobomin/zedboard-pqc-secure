@@ -9,7 +9,8 @@ module mlkem512_unpack_public_controller(
     output logic[15:0]poly_wdata_o,
     output logic[255:0]rho_o,output logic[255:0]hpk_o,output logic[255:0]z_o);
     typedef enum logic[3:0]{IDLE,REQ,WAIT,CAPTURE,WRITE0,WRITE1,META_NEXT,DONE}st_t;
-    st_t state;integer byte_index,group_index;logic[23:0]group;logic[31:0]coeffs;
+    st_t state;logic[10:0]byte_index;logic[1:0]byte_phase;integer group_index;
+    logic[23:0]group;logic[31:0]coeffs;
     logic[7:0]selected_byte;
     mlkem_decode12_group dec(group,coeffs);
     always_comb begin
@@ -24,16 +25,17 @@ module mlkem512_unpack_public_controller(
         busy_o=state!=IDLE;done_o=state==DONE;
     end
     always_ff @(posedge clk_i or negedge rst_ni)begin
-        if(!rst_ni)begin state<=IDLE;byte_index<=768;group_index<=0;group<=0;
+        if(!rst_ni)begin state<=IDLE;byte_index<=768;byte_phase<=0;group_index<=0;group<=0;
             rho_o<=0;hpk_o<=0;z_o<=0;end else case(state)
-            IDLE:if(start_i)begin byte_index<=768;group_index<=0;group<=0;
+            IDLE:if(start_i)begin byte_index<=768;byte_phase<=0;group_index<=0;group<=0;
                 rho_o<=0;hpk_o<=0;z_o<=0;state<=REQ;end
             REQ:state<=WAIT;WAIT:state<=CAPTURE;
             CAPTURE:begin
                 if(byte_index<1536)begin
-                    group[8*((byte_index-768)%3)+:8]<=selected_byte;
+                    group[8*byte_phase+:8]<=selected_byte;
                     byte_index<=byte_index+1;
-                    if(((byte_index-768)%3)==2)state<=WRITE0;else state<=REQ;
+                    if(byte_phase==2'd2)begin byte_phase<=2'd0;state<=WRITE0;end
+                    else begin byte_phase<=byte_phase+2'd1;state<=REQ;end
                 end else begin
                     if(byte_index<1568)rho_o[8*(byte_index-1536)+:8]<=selected_byte;
                     else if(byte_index<1600)hpk_o[8*(byte_index-1568)+:8]<=selected_byte;
