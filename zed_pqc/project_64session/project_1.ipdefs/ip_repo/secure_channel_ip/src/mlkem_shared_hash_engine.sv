@@ -16,7 +16,7 @@ module mlkem_shared_hash_engine(
     output logic[7:0]ct_addr_o,input logic[31:0]ct_rdata_i,
     output logic poly_we_o,output logic[11:0]poly_addr_o,output logic[15:0]poly_wdata_o);
     localparam[2:0]C_HPK=0,C_G=1,C_J=2,C_MATRIX=3,C_NOISE=4,C_TRANSCRIPT=5,C_KDF=6;
-    typedef enum logic[4:0]{IDLE,HSTART,NEXT_IN,MEM_REQ,MEM_WAIT,MEM_CAP,FEED,
+    typedef enum logic[4:0]{IDLE,HSTART,NEXT_IN,MEM_REQ,MEM_WAIT,FEED,
         FINAL,OUT,CHECK,W0,W1,NWRITE,DRAIN,DONE}st_t;st_t state;
     logic[2:0]cmd;logic[255:0]d0,d1;logic[31:0]sid;logic[7:0]x,y,nonce;
     logic eta;logic[3:0]slot;integer in_index,input_len,out_index,byte_count,coeff_count,write_index;
@@ -94,8 +94,10 @@ module mlkem_shared_hash_engine(
                         else inbyte<=d1[8*(in_index-43)+:8];end
                   endcase state<=FEED;end
           end
-          MEM_REQ:state<=MEM_WAIT;MEM_WAIT:state<=MEM_CAP;
-          MEM_CAP:begin inbyte<=mem_byte;state<=FEED;end
+          MEM_REQ:state<=MEM_WAIT;
+          /* The synchronous memory word requested in MEM_REQ is valid in
+             MEM_WAIT; capture it here instead of adding a MEM_CAP cycle. */
+          MEM_WAIT:begin inbyte<=mem_byte;state<=FEED;end
           FEED:if(iready)begin in_index<=in_index+1;state<=NEXT_IN;end
           FINAL:begin out_index<=0;byte_count<=0;group<=0;state<=OUT;end
           OUT:if(oval)begin

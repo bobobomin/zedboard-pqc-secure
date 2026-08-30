@@ -9,7 +9,7 @@ module mlkem512_unpack_controller(
     output logic poly_we_o,output logic [11:0] poly_addr_o,
     output logic [15:0] poly_wdata_o
 );
-    typedef enum logic[3:0]{IDLE,READ_REQ,READ_WAIT,READ_CAPTURE,
+    typedef enum logic[3:0]{IDLE,READ_REQ,READ_WAIT,
         WRITE_COEFF,NEXT_PHASE,DONE}st_t;st_t state;
     localparam logic[1:0] P_D10=0,P_D4=1,P_SK12=2;
     logic[1:0]phase;integer byte_index,group_count,group_index,write_index;
@@ -46,8 +46,10 @@ module mlkem512_unpack_controller(
             IDLE:if(start_i)begin phase<=P_D10;byte_index<=0;group_count<=0;
                 group_index<=0;group_bytes<=0;state<=READ_REQ;end
             READ_REQ:state<=READ_WAIT;
-            READ_WAIT:state<=READ_CAPTURE;
-            READ_CAPTURE:begin
+            /* The source memories are synchronous: the word requested in
+               READ_REQ is already valid throughout READ_WAIT.  Capture it
+               here instead of spending a second, redundant wait cycle. */
+            READ_WAIT:begin
                 group_bytes[8*group_count+:8]<=selected_byte;
                 byte_index<=byte_index+1;
                 if(group_count==group_size-1)begin group_count<=0;write_index<=0;
