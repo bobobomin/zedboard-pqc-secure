@@ -25,9 +25,9 @@ Zynq PL
     `- fault detection / fail-closed protection
 ```
 
-현재 RTL은 **4개의 논리 세션**을 지원하며 ChaCha20-Poly1305 연산 엔진 하나를 공유합니다. 동시에 유효한 요청은 패킷 단위의 비선점형 round-robin 방식으로 선택합니다. 각 패킷의 처리가 끝난 뒤 다음 세션으로 넘어가며 요청이 없는 슬롯은 건너뜁니다.
+현재 RTL은 BRAM 기반 64-session table을 지원하며 ChaCha20-Poly1305 연산 엔진 하나를 공유합니다. 동시에 유효한 요청은 패킷 단위의 비선점형 round-robin 방식으로 선택합니다. 각 패킷의 처리가 끝난 뒤 다음 세션으로 넘어가며 요청이 없는 슬롯은 건너뜁니다.
 
-현재 PS-facing AEAD AXI-Lite frontend는 `pending/inflight` 요청을 한 개만 보관합니다. 실제 다중 클라이언트 통합에서는 PS 소프트웨어 요청 큐가 필요합니다. 32/64세션 확장은 아직 구현되지 않았으며, 향후 BRAM 기반 indexed session table, descriptor FIFO 및 PS 연결 관리 구조로 확장할 계획입니다.
+현재 PS-facing AEAD AXI-Lite frontend는 `pending/inflight` 요청을 한 개만 보관합니다. 따라서 64 session storage는 64개의 암호 엔진이나 64개의 동시 처리 요청을 의미하지 않습니다. 실제 Ethernet 다중 클라이언트 통합에서는 PS 소프트웨어 요청 큐와 descriptor FIFO가 추가로 필요합니다.
 
 ## 구현된 기능
 
@@ -61,7 +61,7 @@ Zynq PL
 - fault injection과 fail-closed 동작
 - PS Bring-up 프로그램 ARM 빌드 및 ELF 링크
 
-실제 ZedBoard에서 단일 세션 PS-PL 하드웨어 bring-up을 완료했습니다. 다중 세션과 Ethernet 통신 검증은 아직 남아 있습니다.
+실제 ZedBoard에서 단일 세션 PS-PL bring-up, 64-session BRAM 검증, 64-user UART join/leave/churn 데모를 완료했습니다. Ethernet 기반 다중 클라이언트 통신, 장시간 안정성, 실제 동시 도착 요청 처리량은 후속 검증 항목입니다.
 
 ## 실제 ZedBoard 검증 결과
 
@@ -95,6 +95,104 @@ ALL PS-PL HARDWARE TESTS PASSED
 ~~~
 
 이 결과는 session slot 1을 이용한 단일 요청의 암호 기능과 PS-PL 통합 경로를 검증한 것입니다. 4개 세션 동시 요청, 장시간 반복 및 실제 Ethernet 통신 검증은 아직 남아 있습니다.
+
+### 64-session BRAM 및 동적 사용자 데모
+
+64-session XSA와 ZedBoard PS preset/DDR 설정을 적용한 실제 보드에서 다음을 검증했습니다.
+
+* slot `0..63` 전체에 ML-KEM 기반 세션을 설치하고 AEAD 암·복호화 수행
+* 64개 slot의 첫 TX counter가 모두 `0`에서 시작함을 확인
+* slot마다 서로 다른 session ID와 traffic material을 사용함을 확인
+* 한 slot의 TX counter 변화가 다른 slot에 영향을 주지 않음을 확인
+* 사용자 이탈 후 slot 재사용 시 새 ML-KEM 세션으로 덮어쓰고 counter가 초기화됨을 확인
+* 범위를 벗어난 slot `64`를 PS 드라이버에서 거부
+* 64 active sessions 상태에서 join, logical leave, rejoin, churn 동작 확인
+
+`LEAVE`는 현재 PS 소프트웨어가 해당 slot을 비활성으로 표시하는 논리적 삭제입니다. 같은 slot에 새 사용자가 `JOIN`하면 새 ML-KEM 세션이 기존 key와 counter를 덮어씁니다. 즉시 key를 0으로 지우는 RTL zeroization은 후속 보안 강화 항목입니다.
+
+## 성능 측정 및 사이클 프로파일
+
+### 실제 ZedBoard 측정 결과
+
+측정 환경은 ZedBoard XC7Z020, Vivado/Vitis 2020.2, PL clock 50 MHz, UART 115200 baud입니다.
+
+작업 | 측정값 | 설명
+--- | ---: | ---
+ML-KEM service total | 2,832 us | ciphertext 적재, AXI START, 완료 대기 포함
+AXI input + START | 91 us | PS에서 ML-KEM AXI frontend까지의 제어·입력 구간
+ML-KEM START-to-DONE | 약 2,741 us | PL 내부 ML-KEM 실행 구간
+AEAD RX, 64 B | 약 26 us | ChaCha20-Poly1305 인증 복호화
+AEAD TX, 64 B | 약 26 us | ChaCha20-Poly1305 암호화
+UART round-trip | 약 34.5 ms | UART 전송 및 PC/Python 프로토콜 포함
+64-slot ML-KEM 평균 | 2,832.0 us | min 2,832 us, max 2,833 us
+
+UART RTT는 암호 연산보다 훨씬 크므로, 현재 UART 데모의 처리량 병목은 PL 가속기가 아니라 직렬 링크와 PC 측 명령 처리입니다.
+
+### Cortex-A9 software-only 비교
+
+동일 ZedBoard에서 `-O2`로 빌드한 C 구현(ML-KEM-native 및 Monocypher)과 비교했습니다.
+
+작업 | Cortex-A9 software only | PL service | 비교
+--- | ---: | ---: | ---
+ML-KEM-512 decapsulation | 1,258.523 us | 2,832 us | SW가 약 2.25배 빠름
+ChaCha20-Poly1305 encrypt, 64 B | 6.723 us | 약 26 us | SW가 약 3.87배 빠름
+ChaCha20-Poly1305 decrypt, 64 B | 6.886 us | 약 26 us | SW가 약 3.78배 빠름
+
+현재 RTL은 단일 요청 latency 기준으로 optimized Cortex-A9 소프트웨어보다 빠르지 않습니다. 현재 하드웨어 구조의 가치는 PL 내부 key 보관, CPU offload, 일정한 실행 시간, 향후 다중 엔진 병렬화 가능성에 있습니다. 따라서 “가속”을 주장하려면 단일 latency뿐 아니라 지속 처리량, CPU 사용률, 다중 요청 처리량을 함께 재측정해야 합니다.
+
+### ML-KEM 사이클 프로파일
+
+ML-KEM AXI frontend에 START부터 DONE까지 계수하는 32-bit counter를 추가했습니다. counter 값은 ML-KEM AXI offset `0x2C`에서 읽습니다.
+
+구간 | Cycles | 50 MHz 환산 | 전체 비율
+--- | ---: | ---: | ---:
+Total | 137,085 | 2,741.70 us | 100.00%
+Core decapsulation | 128,647 | 2,572.94 us | 93.84%
+Transcript hash | 8,154 | 163.08 us | 5.95%
+Traffic KDF | 254 | 5.08 us | 0.19%
+Session install | 28 | 0.56 us | 0.02%
+
+RTL simulation의 `137,085 cycles / 50 MHz = 2,741.7 us`는 실제 보드에서 측정한 START-to-DONE 약 2,741 us와 일치합니다.
+
+연산 | 호출 수 | 호출당 cycles | 합계 cycles | 전체 비율
+--- | ---: | ---: | ---: | ---:
+NTT | 4 | 4,482 | 17,928 | 13.08%
+INTT | 4 | 6,658 | 26,632 | 19.43%
+BaseMul | 8 | 514 | 4,112 | 3.00%
+H(pk) | 1 | 4,174 | 4,174 | 3.04%
+G(m \|\| H(pk)) | 1 | 224 | 224 | 0.16%
+J(z \|\| ct) | 1 | 4,078 | 4,078 | 2.97%
+Matrix SHAKE | - | - | 6,755 | 4.93%
+Noise SHAKE | - | - | 2,590 | 1.89%
+Transcript hash | 1 | 8,154 | 8,154 | 5.95%
+Traffic KDF hash | 1 | 254 | 254 | 0.19%
+
+Hash/SHAKE 전체 합계는 26,229 cycles(19.13%)입니다.
+
+### 데이터 이동 분석 및 최적화 방향
+
+구간 | Cycles | 전체 비율
+--- | ---: | ---:
+Bridge input load | 18,432 | 13.45%
+Bridge core wait (NTT + INTT + BaseMul) | 48,672 | 35.50%
+Bridge result store | 12,288 | 8.96%
+CT/SK unpack | 5,892 | 4.30%
+Public-key unpack | 3,201 | 2.34%
+Polynomial add/sub | 16,137 | 11.77%
+Message-to-polynomial | 257 | 0.19%
+Polynomial-to-message | 769 | 0.56%
+Pack/compare | 5,123 | 3.74%
+
+`Bridge core wait`은 NTT, INTT, BaseMul 합계와 일치합니다. 중복을 제거하면 bridge input/result copy만 30,720 cycles(22.41%)를 차지합니다. 따라서 다음 최적화 우선순위를 둡니다.
+
+1. 공유 BRAM 또는 dual-port memory로 bridge copy 축소
+2. ping-pong buffer/streaming으로 데이터 이동과 연산 중첩
+3. polynomial add/sub의 메모리 접근 파이프라인 개선
+4. INTT scaling/final reduction 결합 및 critical path 파이프라이닝
+5. Hash/SHAKE streaming
+6. timing을 유지하며 50 MHz 이상 FCLK를 단계적으로 탐색
+7. UART와 분리한 AXI 처리량 및 Ethernet 다중 요청 처리량 측정
+
 ## 타이밍 최적화 및 구현 결과
 
 BaseMul을 다중 사이클화하고 NTT/INTT의 Montgomery/Barrett 연산을 파이프라인화했습니다.
@@ -257,4 +355,4 @@ ZedBoard Release(`-O2`) 실측 결과:
 - timing/power side-channel 및 fault 공격 별도 평가
 ## 주의
 
-이 저장소는 연구·교육용 프로토타입입니다. 기능 시뮬레이션, 50 MHz 구현 timing, PS-PL 통합, 4개 논리 세션의 독립성/counter/경계값 및 UART secure echo는 통과했지만 실제 동시 PS 요청, Ethernet 상호운용성, 장시간 안정성, side-channel 평가 및 제품 수준의 보안 검증은 아직 완료되지 않았습니다. 실제 서비스용 암호 시스템으로 사용하면 안 됩니다.
+이 저장소는 연구·교육용 프로토타입입니다. 기능 시뮬레이션, 50 MHz 구현 timing, 단일 및 64-session PS-PL 보드 검증, UART 기반 사용자 join/leave/churn 데모는 통과했습니다. Ethernet 상호운용성, 실제 동시 도착 요청 처리량, 장시간 안정성, side-channel 평가, 즉시 key zeroization 및 제품 수준의 보안 검증은 아직 완료되지 않았습니다. 실제 서비스용 암호 시스템으로 사용하면 안 됩니다.
