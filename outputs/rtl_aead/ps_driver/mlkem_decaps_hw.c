@@ -26,7 +26,7 @@ void mlkem_decaps_hw_init(mlkem_decaps_hw_t*d,uintptr_t base,uint32_t limit){
 int mlkem_decaps_hw_load_secret_key(mlkem_decaps_hw_t*d,const uint8_t sk[1632]){
     return load(d,REGION_SK,sk,MLKEM512_SECRET_KEY_BYTES);}
 int mlkem_decaps_hw_start(mlkem_decaps_hw_t*d,const uint8_t ct[768],uint8_t slot,
-                          uint32_t session_id){int r;if(!d||!ct||slot>=4)return MLKEM_HW_ARGUMENT;
+                          uint32_t session_id){int r;if(!d||!ct||slot>=MLKEM_HW_MAX_SESSIONS)return MLKEM_HW_ARGUMENT;
     r=load(d,REGION_CT,ct,MLKEM512_CIPHERTEXT_BYTES);if(r)return r;
     wr(d,REG_SLOT,slot);wr(d,REG_SESSION,session_id);wr(d,REG_CONTROL,1u<<8);
     wr(d,REG_CONTROL,1u);return MLKEM_HW_OK;}

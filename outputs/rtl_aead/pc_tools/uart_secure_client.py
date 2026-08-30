@@ -1,35 +1,75 @@
 #!/usr/bin/env python3
-"""Four-session UART client and benchmark for the ZedBoard secure echo."""
+"""64-session UART client for join/leave/rejoin ML-KEM demonstrations."""
 
 import argparse
+import hashlib
 import statistics
 import sys
 import time
+from pathlib import Path
 
 import serial
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 PACKET_BYTES = 64
-SESSION_MATERIAL = (
-    (0x01020304, "71732bdafb22b7dcc949f0902c5ef420c16a945633dc87e579fe9e5b7755114a", "7d3fe84c", "a814fc7382a5f27c46909f915772cbf64b5c247c32b443c83bc2b328ef94de96", "a72e02aa"),
-    (0x01020305, "3747b554cce3e11905507ad1caaf503dd48fdabb9f9f9614cdb9f77ae59c126a", "a7688ca4", "3adaa86fb5980c3a234256b22c334a257edc36f09669d54fe2a112fb08d1e4f0", "42886c54"),
-    (0x01020306, "9319c9e1353b4dc0ed516cbf9bf278abddc4a52ef0ea7158ee4b11a8de1ab375", "1aaa8951", "33401e0e03826bcb2302ff1f8f649e1e88eff34de3989cc283a5746745875432", "ea53648b"),
-    (0x01020307, "dcd6fcd7087201dbe6c31dc1d47c3dba92991b7c656201ff704d400d7cb290ce", "b05807d5", "9c1afc5cf1f924b714808e6b5f2e17ab1c4d511c578657ae07edbd4d4482696e", "a17037e6"),
+MAX_SESSIONS = 64
+SHARED_SECRET = bytes.fromhex(
+    "ee5f8f90fb6f15a5934504e1f65c23ad2d60964104bf42463876363a799dee4f"
 )
+KDF_DOMAIN = b"ZYNQ-PQC-v1"
 
 
-def make_sessions():
-    sessions = []
-    for sid, tx_key, tx_prefix, rx_key, rx_prefix in SESSION_MATERIAL:
-        sessions.append({
-            "sid": sid, "tx_key": bytes.fromhex(tx_key),
-            "tx_prefix": bytes.fromhex(tx_prefix),
-            "rx_key": bytes.fromhex(rx_key),
-            "rx_prefix": bytes.fromhex(rx_prefix),
-            "tx_counter": 0, "rx_counter": 0, "kem_us": 0,
-            "rtt_ms": [], "hw_rx_us": [], "hw_tx_us": [],
-        })
-    return sessions
+def default_vector_dir():
+    return Path(__file__).resolve().parents[2] / "golden_reference"
+
+
+def load_vectors(vector_dir):
+    public_key = (vector_dir / "public_key.bin").read_bytes()
+    kem_ciphertext = (vector_dir / "kem_ciphertext.bin").read_bytes()
+    if len(public_key) != 800 or len(kem_ciphertext) != 768:
+        raise ValueError("expected ML-KEM-512 public_key.bin and kem_ciphertext.bin")
+    return public_key, kem_ciphertext
+
+
+def derive_session(session_id, public_key, kem_ciphertext):
+    transcript = hashlib.sha3_256(
+        public_key + kem_ciphertext + session_id.to_bytes(4, "big")
+    ).digest()
+    material = hashlib.shake_256(
+        KDF_DOMAIN + SHARED_SECRET + transcript
+    ).digest(72)
+    return {
+        "sid": session_id,
+        "tx_key": material[0:32],
+        "tx_prefix": material[32:36],
+        "rx_key": material[36:68],
+        "rx_prefix": material[68:72],
+        "tx_counter": 0,
+        "rx_counter": 0,
+        "kem_us": 0,
+        "rtt_ms": [],
+        "hw_rx_us": [],
+        "hw_tx_us": [],
+        "active": True,
+        "user_id": None,
+    }
+
+
+def make_empty_sessions():
+    return [
+        {
+            "active": False,
+            "sid": 0,
+            "user_id": None,
+            "tx_counter": 0,
+            "rx_counter": 0,
+            "kem_us": 0,
+            "rtt_ms": [],
+            "hw_rx_us": [],
+            "hw_tx_us": [],
+        }
+        for _ in range(MAX_SESSIONS)
+    ]
 
 
 def build_nonce(prefix, counter):
@@ -37,57 +77,132 @@ def build_nonce(prefix, counter):
 
 
 def build_aad(session_id, counter, length):
-    return (session_id.to_bytes(4, "big") + counter.to_bytes(8, "big")
-            + bytes((length, 0, 0, 0)))
+    return (
+        session_id.to_bytes(4, "big")
+        + counter.to_bytes(8, "big")
+        + bytes((length, 0, 0, 0))
+    )
 
 
 def read_protocol_line(port, timeout=60.0):
     deadline = time.monotonic() + timeout
+    prefixes = ("READY ", "RESP ", "ERR ", "BYE", "LEFT ", "STATUS ")
     while time.monotonic() < deadline:
         raw = port.readline()
         if not raw:
             continue
         line = raw.decode("ascii", errors="replace").strip()
-        if line.startswith(("READY ", "RESP ", "ERR ", "BYE")):
+        if line.startswith(prefixes):
             return line
     raise TimeoutError("ZedBoard response timeout")
 
 
-def open_session(port, sessions, slot):
-    port.write(f"OPEN {slot}\n".encode("ascii"))
+def send_line(port, text):
+    port.write((text + "\n").encode("ascii"))
     port.flush()
-    line = read_protocol_line(port)
+    return read_protocol_line(port)
+
+
+def join_session(port, sessions, slot, vectors, user_id, join_events):
+    if slot not in range(MAX_SESSIONS):
+        raise ValueError("slot must be 0..63")
+    line = send_line(port, f"OPEN {slot}")
     if line.startswith("ERR "):
         raise RuntimeError(line)
     fields = line.split()
     if len(fields) != 4 or fields[0] != "READY":
         raise RuntimeError(f"malformed READY: {line}")
-    returned_slot, session_id, kem_us = int(fields[1]), int(fields[2], 16), int(fields[3])
-    if returned_slot != slot or session_id != sessions[slot]["sid"]:
+
+    returned_slot = int(fields[1])
+    session_id = int(fields[2], 16)
+    kem_us = int(fields[3])
+    if returned_slot != slot:
+        raise RuntimeError(f"slot mismatch: {line}")
+
+    public_key, kem_ciphertext = vectors
+    state = derive_session(session_id, public_key, kem_ciphertext)
+    state["kem_us"] = kem_us
+    state["user_id"] = user_id
+    sessions[slot] = state
+    join_events.append(kem_us)
+    print(
+        f"[JOIN] user={user_id} slot={slot} session={session_id:08x} "
+        f"ML-KEM={kem_us} us"
+    )
+
+
+def leave_session(port, sessions, slot):
+    if slot not in range(MAX_SESSIONS) or not sessions[slot]["active"]:
+        raise ValueError("slot is not active")
+    old = sessions[slot]
+    line = send_line(port, f"LEAVE {slot}")
+    if line.startswith("ERR "):
+        raise RuntimeError(line)
+    fields = line.split()
+    if len(fields) != 3 or fields[0] != "LEFT" or int(fields[1]) != slot:
+        raise RuntimeError(f"malformed LEFT: {line}")
+    if int(fields[2], 16) != old["sid"]:
         raise RuntimeError(f"session mismatch: {line}")
-    sessions[slot]["tx_counter"] = 0
-    sessions[slot]["rx_counter"] = 0
-    sessions[slot]["kem_us"] = kem_us
-    print(f"[OPEN] user {slot}: session={session_id:08x}, ML-KEM={kem_us} us")
+    sessions[slot] = make_empty_sessions()[0]
+    print(
+        f"[LEAVE] user={old['user_id']} slot={slot} "
+        f"session={old['sid']:08x}"
+    )
+
+
+def board_status(port):
+    line = send_line(port, "STATUS")
+    if line.startswith("ERR "):
+        raise RuntimeError(line)
+    fields = line.split()
+    if len(fields) != 4 or fields[0] != "STATUS":
+        raise RuntimeError(f"malformed STATUS: {line}")
+    count = int(fields[1])
+    bitmap = (int(fields[2], 16) << 32) | int(fields[3], 16)
+    print(f"[STATUS] active={count}/64 bitmap={bitmap:016x}")
+    return count, bitmap
+
+
+def build_data_command(state, slot, plaintext):
+    if len(plaintext) > PACKET_BYTES:
+        raise ValueError("message must be at most 64 UTF-8 bytes")
+    tx_counter = state["tx_counter"]
+    padded = plaintext + bytes(PACKET_BYTES - len(plaintext))
+    request = ChaCha20Poly1305(state["tx_key"]).encrypt(
+        build_nonce(state["tx_prefix"], tx_counter),
+        padded,
+        build_aad(state["sid"], tx_counter, len(plaintext)),
+    )
+    ciphertext, tag = request[:-16], request[-16:]
+    command = (
+        f"DATA {slot} {tx_counter:016x} {len(plaintext)} "
+        f"{ciphertext.hex()} {tag.hex()}"
+    )
+    return command, ciphertext, tag
+
+
+def expect_rejected_packet(port, state, slot, expected_error):
+    command, _, _ = build_data_command(
+        state, slot, b"stale-user-packet"
+    )
+    line = send_line(port, command)
+    if not line.startswith(expected_error):
+        raise RuntimeError(
+            f"expected {expected_error!r} for stale packet, got: {line}"
+        )
 
 
 def secure_echo(port, sessions, slot, plaintext, verbose=True):
     if len(plaintext) > PACKET_BYTES:
         raise ValueError("message must be at most 64 UTF-8 bytes")
+    if slot not in range(MAX_SESSIONS) or not sessions[slot]["active"]:
+        raise ValueError("selected slot is not active")
+
     state = sessions[slot]
-    tx_counter = state["tx_counter"]
-    padded = plaintext + bytes(PACKET_BYTES - len(plaintext))
-    request = ChaCha20Poly1305(state["tx_key"]).encrypt(
-        build_nonce(state["tx_prefix"], tx_counter), padded,
-        build_aad(state["sid"], tx_counter, len(plaintext)))
-    ciphertext, tag = request[:-16], request[-16:]
-    command = (f"DATA {slot} {tx_counter:016x} {len(plaintext)} "
-               f"{ciphertext.hex()} {tag.hex()}\n")
+    command, ciphertext, tag = build_data_command(state, slot, plaintext)
 
     begin = time.perf_counter()
-    port.write(command.encode("ascii"))
-    port.flush()
-    line = read_protocol_line(port)
+    line = send_line(port, command)
     rtt_ms = (time.perf_counter() - begin) * 1000.0
     if line.startswith("ERR "):
         raise RuntimeError(line)
@@ -107,7 +222,8 @@ def secure_echo(port, sessions, slot, plaintext, verbose=True):
     response_padded = ChaCha20Poly1305(state["rx_key"]).decrypt(
         build_nonce(state["rx_prefix"], response_counter),
         response_ciphertext + response_tag,
-        build_aad(state["sid"], response_counter, response_length))
+        build_aad(state["sid"], response_counter, response_length),
+    )
     response_plaintext = response_padded[:response_length]
     if response_plaintext != plaintext:
         raise RuntimeError("secure echo plaintext mismatch")
@@ -118,84 +234,200 @@ def secure_echo(port, sessions, slot, plaintext, verbose=True):
     state["hw_rx_us"].append(hw_rx_us)
     state["hw_tx_us"].append(hw_tx_us)
     if verbose:
-        print(f"[user {slot}] plaintext : {plaintext!r}")
-        print(f"[user {slot}] ciphertext: {ciphertext.hex()}")
-        print(f"[user {slot}] tag       : {tag.hex()}")
-        print(f"[user {slot}] decrypted : {response_plaintext!r}")
-        print(f"[PASS] HW RX={hw_rx_us} us, HW TX={hw_tx_us} us, UART RTT={rtt_ms:.3f} ms\n")
+        print(f"[user {state['user_id']} slot {slot}] plaintext : {plaintext!r}")
+        print(f"[user {state['user_id']} slot {slot}] ciphertext: {ciphertext.hex()}")
+        print(f"[user {state['user_id']} slot {slot}] tag       : {tag.hex()}")
+        print(f"[user {state['user_id']} slot {slot}] decrypted : {response_plaintext!r}")
+        print(
+            f"[PASS] HW RX={hw_rx_us} us, HW TX={hw_tx_us} us, "
+            f"UART RTT={rtt_ms:.3f} ms\n"
+        )
 
 
-def show_stats(sessions):
-    print("\nuser packets  ML-KEM(us)  avg RX(us)  avg TX(us)  avg RTT(ms)")
-    for slot, state in enumerate(sessions):
+def active_slots(sessions):
+    return [slot for slot, state in enumerate(sessions) if state["active"]]
+
+
+def show_stats(sessions, join_events, leaves):
+    slots = active_slots(sessions)
+    packets = sum(len(state["rtt_ms"]) for state in sessions)
+    print(
+        f"\nactive={len(slots)}/64 joins={len(join_events)} "
+        f"leaves={leaves} packets={packets}"
+    )
+    if join_events:
+        print(
+            f"ML-KEM avg={statistics.mean(join_events):.1f} us "
+            f"min={min(join_events)} us max={max(join_events)} us"
+        )
+    print("slot user session   packets KEM(us) RX(us) TX(us) RTT(ms)")
+    for slot in slots:
+        state = sessions[slot]
         count = len(state["rtt_ms"])
-        if count:
-            print(f"{slot:>4} {count:>7} {state['kem_us']:>11} "
-                  f"{statistics.mean(state['hw_rx_us']):>11.1f} "
-                  f"{statistics.mean(state['hw_tx_us']):>11.1f} "
-                  f"{statistics.mean(state['rtt_ms']):>12.3f}")
-        else:
-            print(f"{slot:>4} {0:>7} {state['kem_us']:>11}          -          -            -")
+        rx = f"{statistics.mean(state['hw_rx_us']):.1f}" if count else "-"
+        tx = f"{statistics.mean(state['hw_tx_us']):.1f}" if count else "-"
+        rtt = f"{statistics.mean(state['rtt_ms']):.3f}" if count else "-"
+        print(
+            f"{slot:>4} {state['user_id']:>4} {state['sid']:08x} "
+            f"{count:>7} {state['kem_us']:>7} {rx:>6} {tx:>6} {rtt:>7}"
+        )
     print()
 
 
 def run_rounds(port, sessions, rounds):
-    if rounds <= 0:
-        raise ValueError("round count must be positive")
+    slots = active_slots(sessions)
+    if rounds <= 0 or not slots:
+        raise ValueError("round count must be positive and a session must be active")
     packets = 0
     payload_bytes = 0
     begin = time.perf_counter()
     for round_index in range(rounds):
-        for slot in range(4):
-            message = f"user-{slot} round-{round_index}".encode("ascii")
+        for slot in slots:
+            message = f"slot-{slot} round-{round_index}".encode("ascii")
             secure_echo(port, sessions, slot, message, verbose=False)
             packets += 1
             payload_bytes += len(message)
     elapsed = time.perf_counter() - begin
-    print(f"[ROUND] {packets} packets, {elapsed:.3f} s, "
-          f"payload throughput={payload_bytes / elapsed:.1f} byte/s")
-    show_stats(sessions)
+    print(
+        f"[ROUND] {packets} packets, {elapsed:.3f} s, "
+        f"payload throughput={payload_bytes / elapsed:.1f} byte/s"
+    )
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default="COM3")
     parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--vector-dir", type=Path, default=default_vector_dir())
     args = parser.parse_args()
-    sessions = make_sessions()
+
+    vectors = load_vectors(args.vector_dir)
+    sessions = make_empty_sessions()
+    join_events = []
+    next_user_id = 0
+    leaves = 0
+    selected_slot = None
 
     with serial.Serial(args.port, args.baud, timeout=0.25) as port:
         port.reset_input_buffer()
         port.reset_output_buffer()
-        for slot in range(4):
-            open_session(port, sessions, slot)
+        board_status(port)
+        print(
+            "Commands: /join [slot], /leave <slot>, /fill <count>, "
+            "/churn <count>, /user <slot>, /round <count>, "
+            "/status, /stats, /quit"
+        )
 
-        selected_slot = 0
-        print("Commands: /user 0..3, /round N, /stats, /reopen N, /quit")
         while True:
-            text = input(f"secure[user{selected_slot}]> ")
+            prompt = "secure[no-session]> " if selected_slot is None else (
+                f"secure[slot{selected_slot}]> "
+            )
+            text = input(prompt).strip()
             if text == "/quit":
                 port.write(b"QUIT\n")
                 port.flush()
                 break
+            if text == "/status":
+                board_status(port)
+                continue
             if text == "/stats":
-                show_stats(sessions)
+                show_stats(sessions, join_events, leaves)
+                continue
+            if text.startswith("/join"):
+                fields = text.split()
+                if len(fields) == 2:
+                    slot = int(fields[1])
+                else:
+                    free = [i for i in range(MAX_SESSIONS)
+                            if not sessions[i]["active"]]
+                    if not free:
+                        raise ValueError("all 64 slots are active")
+                    slot = free[0]
+                join_session(
+                    port, sessions, slot, vectors, next_user_id, join_events
+                )
+                next_user_id += 1
+                selected_slot = slot
+                continue
+            if text.startswith("/leave "):
+                slot = int(text.split()[1])
+                leave_session(port, sessions, slot)
+                leaves += 1
+                if selected_slot == slot:
+                    slots = active_slots(sessions)
+                    selected_slot = slots[0] if slots else None
+                continue
+            if text.startswith("/fill "):
+                target = int(text.split()[1])
+                if target not in range(MAX_SESSIONS + 1):
+                    raise ValueError("fill count must be 0..64")
+                while len(active_slots(sessions)) < target:
+                    slot = next(i for i in range(MAX_SESSIONS)
+                                if not sessions[i]["active"])
+                    join_session(
+                        port, sessions, slot, vectors,
+                        next_user_id, join_events
+                    )
+                    next_user_id += 1
+                    selected_slot = slot
+                board_status(port)
+                continue
+            if text.startswith("/churn "):
+                count = int(text.split()[1])
+                if count <= 0:
+                    raise ValueError("churn count must be positive")
+                if not active_slots(sessions):
+                    join_session(
+                        port, sessions, 0, vectors,
+                        next_user_id, join_events
+                    )
+                    next_user_id += 1
+                begin = time.perf_counter()
+                kem_begin = len(join_events)
+                for index in range(count):
+                    slots = active_slots(sessions)
+                    slot = slots[index % len(slots)]
+                    old_state = sessions[slot].copy()
+                    leave_session(port, sessions, slot)
+                    leaves += 1
+                    expect_rejected_packet(
+                        port, old_state, slot, "ERR NOSESSION"
+                    )
+                    join_session(
+                        port, sessions, slot, vectors,
+                        next_user_id, join_events
+                    )
+                    next_user_id += 1
+                    expect_rejected_packet(
+                        port, old_state, slot, "ERR AUTH"
+                    )
+                    secure_echo(
+                        port, sessions, slot,
+                        f"new-user-{next_user_id}".encode("ascii"),
+                        verbose=False,
+                    )
+                elapsed = time.perf_counter() - begin
+                new_kem = join_events[kem_begin:]
+                print(
+                    f"[CHURN] {count} leave+join+stale-reject+secure events, "
+                    f"{elapsed:.3f} s, {count / elapsed:.2f} events/s, "
+                    f"ML-KEM avg={statistics.mean(new_kem):.1f} us"
+                )
+                selected_slot = slot
                 continue
             if text.startswith("/user "):
-                selected_slot = int(text.split()[1])
-                if selected_slot not in range(4):
-                    raise ValueError("user must be 0..3")
-                continue
-            if text.startswith("/reopen "):
                 slot = int(text.split()[1])
-                if slot not in range(4):
-                    raise ValueError("slot must be 0..3")
-                open_session(port, sessions, slot)
+                if slot not in range(MAX_SESSIONS) or not sessions[slot]["active"]:
+                    raise ValueError("slot must be an active slot in 0..63")
+                selected_slot = slot
                 continue
             if text.startswith("/round "):
                 run_rounds(port, sessions, int(text.split()[1]))
                 continue
 
+            if selected_slot is None:
+                print("No active session. Use /join or /fill first.")
+                continue
             encoded = text.encode("utf-8")
             if len(encoded) > PACKET_BYTES:
                 print("Message is longer than 64 UTF-8 bytes.")

@@ -91,14 +91,6 @@ static int wait_request_idle(const aead_hw_t *device)
                        NULL);
 }
 
-static void write_key(const aead_hw_t *device, uint32_t base,
-                      const uint8_t key[AEAD_HW_KEY_BYTES])
-{
-    uint32_t i;
-    for (i = 0u; i < 8u; ++i)
-        mmio_write(device, base + 4u*i, load32_le(key + 4u*i));
-}
-
 static void write_packet(const aead_hw_t *device, const uint8_t *message,
                          uint8_t message_length)
 {
@@ -140,30 +132,17 @@ int aead_hw_configure_session(aead_hw_t *device, uint8_t slot,
                               const uint8_t tx_prefix[4],
                               const uint8_t rx_prefix[4])
 {
-    if (device == NULL || slot >= 4u || tx_key == NULL || rx_key == NULL
-        || tx_prefix == NULL || rx_prefix == NULL)
-        return AEAD_HW_ERR_ARGUMENT;
-    if (wait_request_idle(device) != AEAD_HW_OK)
-        return AEAD_HW_ERR_TIMEOUT;
-
-    mmio_write(device, REG_CFG_SESSION_ID, session_id);
-    write_key(device, REG_TX_KEY_BASE, tx_key);
-    write_key(device, REG_RX_KEY_BASE, rx_key);
-    mmio_write(device, REG_TX_PREFIX, load32_le(tx_prefix));
-    mmio_write(device, REG_RX_PREFIX, load32_le(rx_prefix));
-    mmio_write(device, REG_CFG_CONTROL,
-               (1u << 31) | (1u << 8) | (uint32_t)slot);
-    return wait_status(device, 0u, STATUS_CFG_PENDING, NULL);
+    (void)device; (void)slot; (void)session_id; (void)tx_key; (void)rx_key;
+    (void)tx_prefix; (void)rx_prefix;
+    /* Final hardware only installs authenticated material after ML-KEM
+     * decapsulation. Direct PS key provisioning is intentionally disabled. */
+    return AEAD_HW_ERR_UNSUPPORTED;
 }
 
 int aead_hw_clear_session(aead_hw_t *device, uint8_t slot)
 {
-    if (device == NULL || slot >= 4u)
-        return AEAD_HW_ERR_ARGUMENT;
-    if (wait_request_idle(device) != AEAD_HW_OK)
-        return AEAD_HW_ERR_TIMEOUT;
-    mmio_write(device, REG_CFG_CONTROL, (1u << 31) | (uint32_t)slot);
-    return wait_status(device, 0u, STATUS_CFG_PENDING, NULL);
+    (void)device; (void)slot;
+    return AEAD_HW_ERR_UNSUPPORTED;
 }
 
 int aead_hw_install_mlkem_session(aead_hw_t *device, uint8_t slot,
@@ -171,22 +150,9 @@ int aead_hw_install_mlkem_session(aead_hw_t *device, uint8_t slot,
                                  const uint8_t shared_secret[32],
                                  const uint8_t transcript_hash[32])
 {
-    uint32_t i;
-    if (device == NULL || slot >= 4u || shared_secret == NULL
-        || transcript_hash == NULL)
-        return AEAD_HW_ERR_ARGUMENT;
-    if (wait_request_idle(device) != AEAD_HW_OK)
-        return AEAD_HW_ERR_TIMEOUT;
-    mmio_write(device, REG_REQUEST_SLOT, slot);
-    mmio_write(device, REG_CFG_SESSION_ID, session_id);
-    for (i = 0u; i < 8u; ++i) {
-        mmio_write(device, REG_SHARED_SECRET + 4u*i,
-                   load32_le(shared_secret + 4u*i));
-        mmio_write(device, REG_TRANSCRIPT_HASH + 4u*i,
-                   load32_le(transcript_hash + 4u*i));
-    }
-    mmio_write(device, REG_KDF_CONTROL, 1u);
-    return wait_status(device, 0u, STATUS_KDF_BUSY | STATUS_CFG_PENDING, NULL);
+    (void)device; (void)slot; (void)session_id;
+    (void)shared_secret; (void)transcript_hash;
+    return AEAD_HW_ERR_UNSUPPORTED;
 }
 
 int aead_hw_encrypt(aead_hw_t *device, uint8_t slot,
@@ -198,7 +164,7 @@ int aead_hw_encrypt(aead_hw_t *device, uint8_t slot,
     uint32_t status;
     uint64_t counter;
 
-    if (device == NULL || slot >= 4u || message == NULL
+    if (device == NULL || slot >= AEAD_HW_MAX_SESSIONS || message == NULL
         || message_length > 64u || ciphertext == NULL || tag == NULL)
         return AEAD_HW_ERR_ARGUMENT;
     if (wait_request_idle(device) != AEAD_HW_OK)
@@ -234,7 +200,7 @@ int aead_hw_decrypt(aead_hw_t *device, uint8_t slot,
     uint32_t i;
     uint32_t status;
 
-    if (device == NULL || slot >= 4u || message_length > 64u
+    if (device == NULL || slot >= AEAD_HW_MAX_SESSIONS || message_length > 64u
         || ciphertext == NULL || tag == NULL || plaintext == NULL)
         return AEAD_HW_ERR_ARGUMENT;
     if (wait_request_idle(device) != AEAD_HW_OK)

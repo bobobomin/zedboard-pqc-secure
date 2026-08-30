@@ -11,12 +11,8 @@
 #include "secure_channel_hw.h"
 #include "zed_pqc_kat_vectors.h"
 
-#define UART_DEMO_SESSIONS   4u
+#define UART_DEMO_SESSIONS   AEAD_HW_MAX_SESSIONS
 #define UART_DEMO_LINE_BYTES 256u
-
-static const uint32_t demo_session_id[UART_DEMO_SESSIONS] = {
-    0x01020304u, 0x01020305u, 0x01020306u, 0x01020307u
-};
 
 static int hex_nibble(char value)
 {
@@ -54,25 +50,34 @@ static int parse_u64_hex(const char *text, uint64_t *value)
     return 1;
 }
 
-static int parse_length(const char *text, uint8_t *length)
+static int parse_decimal(const char *text, unsigned int maximum,
+                         unsigned int *value)
 {
-    unsigned int value = 0u;
-    if (text == NULL || length == NULL || *text == '\0') return 0;
+    unsigned int result = 0u;
+    if (text == NULL || value == NULL || *text == '\0') return 0;
     while (*text != '\0') {
         if (*text < '0' || *text > '9') return 0;
-        value = 10u * value + (unsigned int)(*text - '0');
-        if (value > AEAD_HW_PACKET_BYTES) return 0;
+        result = 10u * result + (unsigned int)(*text - '0');
+        if (result > maximum) return 0;
         ++text;
     }
+    *value = result;
+    return 1;
+}
+
+static int parse_length(const char *text, uint8_t *length)
+{
+    unsigned int value;
+    if (!parse_decimal(text, AEAD_HW_PACKET_BYTES, &value)) return 0;
     *length = (uint8_t)value;
     return 1;
 }
 
 static int parse_slot(const char *text, uint8_t *slot)
 {
-    if (text == NULL || slot == NULL || text[0] < '0' ||
-        text[0] > '3' || text[1] != '\0') return 0;
-    *slot = (uint8_t)(text[0] - '0');
+    unsigned int value;
+    if (!parse_decimal(text, UART_DEMO_SESSIONS - 1u, &value)) return 0;
+    *slot = (uint8_t)value;
     return 1;
 }
 
@@ -126,7 +131,13 @@ static int read_line(char *line, size_t capacity)
     }
 }
 
-static int establish_demo_session(secure_channel_hw_t *device, uint8_t slot)
+static uint32_t make_session_id(uint8_t slot, uint32_t generation)
+{
+    return 0x60000000u | ((generation & 0x003fffffu) << 6) | slot;
+}
+
+static int establish_demo_session(secure_channel_hw_t *device, uint8_t slot,
+                                  uint32_t session_id)
 {
     XTime begin, end;
     uint32_t elapsed_us;
@@ -134,7 +145,7 @@ static int establish_demo_session(secure_channel_hw_t *device, uint8_t slot)
 
     XTime_GetTime(&begin);
     result = secure_channel_hw_establish_session(
-        device, zed_kat_kem_ciphertext, slot, demo_session_id[slot]);
+        device, zed_kat_kem_ciphertext, slot, session_id);
     XTime_GetTime(&end);
     elapsed_us = ticks_to_us(begin, end);
 
@@ -144,9 +155,30 @@ static int establish_demo_session(secure_channel_hw_t *device, uint8_t slot)
     }
 
     xil_printf("READY %d ", (int)slot);
-    write_u32_hex(demo_session_id[slot]);
+    write_u32_hex(session_id);
     xil_printf(" %lu\r\n", (unsigned long)elapsed_us);
     return 1;
+}
+
+static void write_status(const uint8_t active[UART_DEMO_SESSIONS])
+{
+    uint32_t bitmap_lo = 0u;
+    uint32_t bitmap_hi = 0u;
+    uint32_t count = 0u;
+    uint32_t slot;
+
+    for (slot = 0u; slot < UART_DEMO_SESSIONS; ++slot) {
+        if (!active[slot]) continue;
+        ++count;
+        if (slot < 32u) bitmap_lo |= (uint32_t)1u << slot;
+        else bitmap_hi |= (uint32_t)1u << (slot - 32u);
+    }
+
+    xil_printf("STATUS %lu ", (unsigned long)count);
+    write_u32_hex(bitmap_hi);
+    outbyte(' ');
+    write_u32_hex(bitmap_lo);
+    xil_printf("\r\n");
 }
 
 int uart_secure_demo_run(uintptr_t mlkem_base, uintptr_t aead_base,
@@ -154,13 +186,19 @@ int uart_secure_demo_run(uintptr_t mlkem_base, uintptr_t aead_base,
 {
     secure_channel_hw_t device;
     char line[UART_DEMO_LINE_BYTES];
-    uint8_t session_active[UART_DEMO_SESSIONS] = {0u, 0u, 0u, 0u};
+    uint8_t session_active[UART_DEMO_SESSIONS];
+    uint32_t session_generation[UART_DEMO_SESSIONS];
+    uint32_t session_id[UART_DEMO_SESSIONS];
     uint8_t ciphertext[AEAD_HW_PACKET_BYTES];
     uint8_t tag[AEAD_HW_TAG_BYTES];
     uint8_t plaintext[AEAD_HW_PACKET_BYTES];
     uint8_t response_ciphertext[AEAD_HW_PACKET_BYTES];
     uint8_t response_tag[AEAD_HW_TAG_BYTES];
     int result;
+
+    memset(session_active, 0, sizeof(session_active));
+    memset(session_generation, 0, sizeof(session_generation));
+    memset(session_id, 0, sizeof(session_id));
 
     secure_channel_hw_init(&device, mlkem_base, aead_base, poll_limit);
     result = secure_channel_hw_load_secret_key(&device, zed_kat_secret_key);
@@ -169,8 +207,9 @@ int uart_secure_demo_run(uintptr_t mlkem_base, uintptr_t aead_base,
         return result;
     }
 
-    xil_printf("\r\nUART-SECURE-DEMO 2\r\n");
-    xil_printf("COMMANDS OPEN <0..3>, DATA <slot> ..., QUIT\r\n");
+    xil_printf("\r\nUART-SECURE-DEMO 3 64-SESSIONS\r\n");
+    xil_printf("COMMANDS OPEN/LEAVE/DATA <0..63>, STATUS, QUIT\r\n");
+    xil_printf("NOTE LEAVE is PS-logical; OPEN securely overwrites the slot\r\n");
 
     for (;;) {
         char *command;
@@ -184,9 +223,14 @@ int uart_secure_demo_run(uintptr_t mlkem_base, uintptr_t aead_base,
 
         command = strtok(line, " ");
         if (command == NULL) continue;
+
         if (strcmp(command, "QUIT") == 0) {
             xil_printf("BYE\r\n");
             return 0;
+        }
+        if (strcmp(command, "STATUS") == 0) {
+            write_status(session_active);
+            continue;
         }
 
         slot_text = strtok(NULL, " ");
@@ -196,8 +240,25 @@ int uart_secure_demo_run(uintptr_t mlkem_base, uintptr_t aead_base,
         }
 
         if (strcmp(command, "OPEN") == 0) {
-            session_active[slot] =
-                (uint8_t)establish_demo_session(&device, slot);
+            uint32_t new_id = make_session_id(slot, session_generation[slot]);
+            if (establish_demo_session(&device, slot, new_id)) {
+                session_active[slot] = 1u;
+                session_id[slot] = new_id;
+                ++session_generation[slot];
+            }
+            continue;
+        }
+
+        if (strcmp(command, "LEAVE") == 0) {
+            if (!session_active[slot]) {
+                xil_printf("ERR NOSESSION %d\r\n", (int)slot);
+                continue;
+            }
+            session_active[slot] = 0u;
+            xil_printf("LEFT %d ", (int)slot);
+            write_u32_hex(session_id[slot]);
+            xil_printf("\r\n");
+            session_id[slot] = 0u;
             continue;
         }
 
@@ -215,11 +276,11 @@ int uart_secure_demo_run(uintptr_t mlkem_base, uintptr_t aead_base,
                 xil_printf("ERR NOSESSION %d\r\n", (int)slot);
                 continue;
             }
-            if (!parse_u64_hex(counter_text, &request_counter) ||
-                !parse_length(length_text, &message_length) ||
-                !decode_hex_exact(ciphertext_text, ciphertext,
-                                  sizeof(ciphertext)) ||
-                !decode_hex_exact(tag_text, tag, sizeof(tag))) {
+            if (!parse_u64_hex(counter_text, &request_counter)
+                || !parse_length(length_text, &message_length)
+                || !decode_hex_exact(ciphertext_text, ciphertext,
+                                     sizeof(ciphertext))
+                || !decode_hex_exact(tag_text, tag, sizeof(tag))) {
                 xil_printf("ERR FORMAT\r\n");
                 continue;
             }
