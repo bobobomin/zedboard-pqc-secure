@@ -129,17 +129,17 @@ module aead_traffic_indexed_axi_lite_frontend #(
             REG_FAULT: read_mux = {23'd0, fault_detected_i, fault_code_i};
             REG_RSP_SLOT: read_mux = {{(32-SLOT_WIDTH){1'b0}}, rsp_slot_q};
             default: begin
-                for (i = 0; i < 16; i = i + 1) begin
-                    if (s_axi_araddr[8:0] == REG_INPUT_DATA + 4*i)
-                        read_mux = input_data[i];
-                    if (s_axi_araddr[8:0] == REG_OUTPUT_DATA + 4*i)
-                        read_mux = rsp_data_q[32*i +: 32];
+                for (int rd = 0; rd < 16; rd++) begin
+                    if (s_axi_araddr[8:0] == REG_INPUT_DATA + 4*rd)
+                        read_mux = input_data[rd];
+                    if (s_axi_araddr[8:0] == REG_OUTPUT_DATA + 4*rd)
+                        read_mux = rsp_data_q[32*rd +: 32];
                 end
-                for (i = 0; i < 4; i = i + 1) begin
-                    if (s_axi_araddr[8:0] == REG_INPUT_TAG + 4*i)
-                        read_mux = input_tag[i];
-                    if (s_axi_araddr[8:0] == REG_OUTPUT_TAG + 4*i)
-                        read_mux = rsp_tag_q[32*i +: 32];
+                for (int rt = 0; rt < 4; rt++) begin
+                    if (s_axi_araddr[8:0] == REG_INPUT_TAG + 4*rt)
+                        read_mux = input_tag[rt];
+                    if (s_axi_araddr[8:0] == REG_OUTPUT_TAG + 4*rt)
+                        read_mux = rsp_tag_q[32*rt +: 32];
                 end
             end
         endcase
