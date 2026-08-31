@@ -162,11 +162,13 @@ that permits packet reordering should later replace it with a replay window.
 
 ## Implementation note
 
-ChaCha20 evaluates one complete column or diagonal round per cycle using four
-parallel quarter-round datapaths. Poly1305 uses five radix-2^26 limbs and
-reuses one 28x29-bit multiplier across 25 schoolbook products per 16-byte
-block. This favors low DSP use over Poly1305 latency and leaves DSP capacity
-for ML-KEM.
+ChaCha20 evaluates half a column or diagonal round per cycle over four
+quarter-round datapaths. A quarter round chains four dependent 32-bit
+additions, so a whole round per cycle stacked too many logic levels for
+100 MHz. Poly1305 uses five radix-2^26 limbs and reuses one 28x29-bit
+multiplier across 25 schoolbook products per 16-byte block, with operand
+selection, multiply and accumulate in separate cycles. This favors low DSP use
+over AEAD latency and leaves DSP capacity for ML-KEM.
 
 The integrated AXI-Lite top accepts the complete ML-KEM-512 secret key and
 ciphertext and automatically installs a valid Decaps result into the selected

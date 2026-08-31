@@ -72,8 +72,9 @@ BaseMul을 다중 사이클화하고 NTT/INTT의 Montgomery/Barrett 연산을 �
 | BaseMul 수정 후 | -1.611 ns | -74.895 ns | 64 |
 | NTT/INTT 수정 후(4세션) | +0.215 ns | 0 ns | 0 |
 | **64세션 BRAM 구조** | **+0.282 ns** | **0 ns** | **0** |
+| **100 MHz 최적화 후(64세션)** | **+0.048 ns** | **0 ns** | **0** |
 
-64세션 설계는 Vivado 2020.2에서 전체 합성·구현·배선을 완료했으며 50 MHz timing constraint를 만족합니다. Hold slack은 `+0.015 ns`, THS는 `0 ns`, setup/hold 실패 endpoint와 routing error는 모두 0개입니다.
+64세션 설계는 50 MHz timing constraint를 만족하며, 상수 곱셈 축소·AEAD 데이터패스 분할·팬아웃 복제·이중화 비교 레지스터화를 적용한 뒤 **100 MHz(10 ns)에서도 배치·배선을 완주하고 timing을 만족합니다**. 100 MHz 기준 hold slack은 `+0.019 ns`, setup/hold 실패 endpoint와 routing error는 모두 0개입니다.
 
 ### XC7Z020 64세션 post-synthesis 결과
 
@@ -109,42 +110,44 @@ PR #2 타이밍 파이프라인과 후속 사이클 최적화를 반영한 64세
 | 전체 ML-KEM decapsulation 테스트 | PASS |
 | 총 decapsulation 지연 | 104,245 cycles |
 | CORE decapsulation | 97,364 cycles |
-| 목표 클록 | 50 MHz |
+| 목표 클록 | 100 MHz |
 | 타이밍 제약 | 모두 만족 |
+
+100 MHz 최적화로 파이프라인 단수가 늘어 decapsulation 지연이 약 0.7% 증가했습니다(동일 조건 RTL 시뮬레이션 기준 148,092 → 149,133 cycles). 동작 클록이 2배가 되므로 실제 소요 시간은 절반 가까이 줄어듭니다.
 
 ### 구현 후 자원 사용량
 
 | 자원 | 사용량 |
 |---|---:|
-| LUT | 29,876 |
-| FF | 27,045 |
+| LUT | 21,758 |
+| FF | 25,755 |
 | BRAM | 9 |
-| DSP | 59 |
+| DSP | 52 |
 
 ### 타이밍 요약
 
 | 항목 | 결과 |
 |---|---:|
-| WNS | +0.612 ns |
+| WNS | +0.048 ns |
 | TNS | 0.000 ns |
 | WHS | +0.019 ns |
-| 설정 주파수 | 50 MHz (20 ns period) |
+| 설정 주파수 | 100 MHz (10 ns period) |
 | 타이밍 상태 | PASS |
 
-### 주요 최악 경로
+### 해소된 최악 경로
 
-| 우선순위 | 경로/블록 | 지연 |
-|---:|---|---:|
-| 1 | Poly1305 accumulation | 18.800 ns |
-| 2 | SHA3/Hash | 16.447 ns |
-| 3 | POLY→MESSAGE | 17.272 ns |
-| 4 | Public-key unpack | 14.728 ns |
-| 5 | Pack/Compare | 11.992 ns |
-| 6 | Poly bridge | 11.720 ns |
-| 7 | ML-KEM Poly Add/Sub | 9.913 ns |
-| 8 | ML-KEM BaseMul | 약 7.6 ns |
+50 MHz 기준 상위 경로는 모두 100 MHz 최적화로 해소되었다.
 
-PR #2의 Barrett reduction 및 BaseMul 파이프라인과 후속 데이터 이동 최적화를 적용한 결과, 총 decapsulation 지연이 148,093 cycles에서 104,245 cycles로 감소했다. 50 MHz 구현 타이밍은 만족하며, 100 MHz 목표에서는 Poly1305와 SHA3/Hash 경로를 우선적으로 최적화한다.
+| 경로/블록 | 원인 | 수정 |
+|---|---|---|
+| Poly1305 accumulation | 곱셈기 2개 직렬 + 자리올림 44단 | r*5 사전 계산, 곱셈/누산/자리올림 분할 |
+| SHA3/Hash | 1,600비트 갱신망 2벌, 팬아웃 1,630 | 갱신망 1벌로 축소, 제어 신호 복제 |
+| POLY→MESSAGE | 조합 경로의 16x32 곱셈 | Compress_1을 비교 2개로 대체 |
+| Public-key unpack | 복원 곱셈이 메모리 쓰기 경로에 위치 | 3329 곱셈을 시프트-덧셈으로 대체 |
+| Pack/Compare | 32비트 상수로 DSP 2개 직렬 | 22비트 상수로 DSP 1개 |
+| ML-KEM BaseMul | BRAM 출력이 DSP에 직결 | 입력 레지스터 1단 추가 |
+
+PR #2의 Barrett reduction 및 BaseMul 파이프라인과 후속 데이터 이동 최적화를 적용한 결과, 총 decapsulation 지연이 148,093 cycles에서 104,245 cycles로 감소했다. 이어서 Poly1305, SHA3/Hash, 압축·복원 상수 곱셈 경로를 최적화하여 **100 MHz timing을 만족**하며, LUT 사용량도 55.97%에서 40.90%로 감소했다.
 
 ## 디렉터리
 
