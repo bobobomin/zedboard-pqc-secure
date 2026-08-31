@@ -31,7 +31,7 @@ module mlkem_poly_accelerator (
                               INTT_SCALE_WRITE,
                               INTT_READ, INTT_PREP, INTT_MUL,
                               INTT_MONT, INTT_REDUCE, INTT_WRITE,
-                              BASEMUL_READ, BASEMUL_MUL,
+                              BASEMUL_READ, BASEMUL_LATCH, BASEMUL_MUL,
                               BASEMUL_MONT, BASEMUL_REDUCE,
                               BASEMUL_ZMUL, BASEMUL_ZMONT,
                               BASEMUL_ZREDUCE, BASEMUL_WRITE} state_t;
@@ -46,6 +46,7 @@ module mlkem_poly_accelerator (
     logic [7:0] a_addr0,a_addr1,b_addr0,b_addr1,r_addr0,r_addr1;
     logic signed [15:0] a_din0,a_din1,b_din0,b_din1,r_din0,r_din1;
     logic signed [15:0] a_dout0,a_dout1,b_dout0,b_dout1,r_dout0,r_dout1;
+    logic signed [15:0] bm_a0_reg,bm_a1_reg,bm_b0_reg,bm_b1_reg;
     /* Break every Montgomery product across clock boundaries so the BaseMul
      * BRAM-to-BRAM path holds one multiply per stage, as NTT/INTT already do.
      * The four coefficient products share the MUL/MONT/REDUCE stages; the
@@ -292,12 +293,20 @@ module mlkem_poly_accelerator (
                     end else begin butterfly<=butterfly+1;state<=INTT_READ;end
                 end
 
-                BASEMUL_READ:state<=BASEMUL_MUL;
+                BASEMUL_READ:state<=BASEMUL_LATCH;
+                /* Coefficient RAM output goes straight into the multipliers
+                   otherwise, putting block RAM read delay and DSP entry in the
+                   same clock. */
+                BASEMUL_LATCH:begin
+                    bm_a0_reg<=a_dout0;bm_a1_reg<=a_dout1;
+                    bm_b0_reg<=b_dout0;bm_b1_reg<=b_dout1;
+                    state<=BASEMUL_MUL;
+                end
                 BASEMUL_MUL:begin
-                    basemul_prod11_reg<=a_dout1*b_dout1;
-                    basemul_prod00_reg<=a_dout0*b_dout0;
-                    basemul_prod01_reg<=a_dout0*b_dout1;
-                    basemul_prod10_reg<=a_dout1*b_dout0;
+                    basemul_prod11_reg<=bm_a1_reg*bm_b1_reg;
+                    basemul_prod00_reg<=bm_a0_reg*bm_b0_reg;
+                    basemul_prod01_reg<=bm_a0_reg*bm_b1_reg;
+                    basemul_prod10_reg<=bm_a1_reg*bm_b0_reg;
                     basemul_zeta_reg<=pair_index[0]
                         ? -zetas[64+(pair_index>>1)]:zetas[64+(pair_index>>1)];
                     state<=BASEMUL_MONT;

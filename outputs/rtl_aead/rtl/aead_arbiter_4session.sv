@@ -40,6 +40,7 @@ module aead_arbiter_4session (
 
     typedef enum logic [1:0] {
         A_IDLE,
+        A_GRANT,
         A_WAIT_ENGINE,
         A_RESPONSE
     } arb_state_t;
@@ -124,11 +125,19 @@ module aead_arbiter_4session (
         endcase
     end
 
+    /*
+     * The winner is registered into active_slot before anything wide is
+     * selected by it.  Without this stage the requester's slot index reaches
+     * the 2048-bit response registers and the 512-bit engine inputs through
+     * one clock of combinational decode, which is the longest route in the
+     * design.  Acceptance moves to A_GRANT so the payload is still held by the
+     * requester when it is captured.
+     */
     always_comb begin
         req_ready_o = 4'b0000;
         cfg_ready_o = (state == A_IDLE);
-        if ((state == A_IDLE) && !cfg_write_i && grant_valid)
-            req_ready_o[grant_slot] = 1'b1;
+        if (state == A_GRANT)
+            req_ready_o[active_slot] = 1'b1;
     end
 
     aead_fixed64_engine u_engine (
@@ -185,52 +194,56 @@ module aead_arbiter_4session (
                         tx_counter[cfg_slot_i]    <= 64'd0;
                         rx_counter[cfg_slot_i]    <= 64'd0;
                     end else if (grant_valid) begin
-                        active_slot    <= grant_slot;
-                        active_decrypt <= req_decrypt_i[grant_slot];
-                        last_grant     <= grant_slot;
+                        active_slot <= grant_slot;
+                        last_grant  <= grant_slot;
+                        state       <= A_GRANT;
+                    end
+                end
 
-                        if (req_decrypt_i[grant_slot])
-                            active_counter <= req_counter_i[64*grant_slot +: 64];
-                        else
-                            active_counter <= tx_counter[grant_slot];
+                A_GRANT: begin
+                    active_decrypt <= req_decrypt_i[active_slot];
 
-                        if (!session_valid[grant_slot]
-                            || (req_data_len_i[8*grant_slot +: 8] > 8'd64)
-                            || (req_decrypt_i[grant_slot]
-                                && req_counter_i[64*grant_slot +: 64]
-                                   != rx_counter[grant_slot])) begin
-                            rsp_data_o[512*grant_slot +: 512]    <= '0;
-                            rsp_tag_o[128*grant_slot +: 128]     <= '0;
-                            rsp_counter_o[64*grant_slot +: 64]   <=
-                                req_decrypt_i[grant_slot]
-                                ? req_counter_i[64*grant_slot +: 64] : 64'd0;
-                            rsp_auth_ok_o[grant_slot] <= 1'b0;
-                            rsp_error_o[grant_slot]   <= 1'b1;
-                            rsp_valid_o[grant_slot]   <= 1'b1;
-                            state <= A_RESPONSE;
-                        end else begin
-                            engine_decrypt <= req_decrypt_i[grant_slot];
-                            engine_key <= req_decrypt_i[grant_slot]
-                                        ? rx_key[grant_slot] : tx_key[grant_slot];
-                            engine_nonce[31:0] <= req_decrypt_i[grant_slot]
-                                                   ? rx_prefix[grant_slot]
-                                                   : tx_prefix[grant_slot];
-                            engine_nonce[95:32] <= pack64_be(
-                                req_decrypt_i[grant_slot]
-                                ? req_counter_i[64*grant_slot +: 64]
-                                : tx_counter[grant_slot]);
-                            engine_aad <= '0;
-                            engine_aad[31:0] <= pack32_be(session_id[grant_slot]);
-                            engine_aad[95:32] <= pack64_be(
-                                req_decrypt_i[grant_slot]
-                                ? req_counter_i[64*grant_slot +: 64]
-                                : tx_counter[grant_slot]);
-                            engine_aad[103:96] <= req_data_len_i[8*grant_slot +: 8];
-                            engine_data_in <= req_data_i[512*grant_slot +: 512];
-                            engine_received_tag <= req_tag_i[128*grant_slot +: 128];
-                            engine_start <= 1'b1;
-                            state <= A_WAIT_ENGINE;
-                        end
+                    if (req_decrypt_i[active_slot])
+                        active_counter <= req_counter_i[64*active_slot +: 64];
+                    else
+                        active_counter <= tx_counter[active_slot];
+
+                    if (!session_valid[active_slot]
+                        || (req_data_len_i[8*active_slot +: 8] > 8'd64)
+                        || (req_decrypt_i[active_slot]
+                            && req_counter_i[64*active_slot +: 64]
+                               != rx_counter[active_slot])) begin
+                        rsp_data_o[512*active_slot +: 512]    <= '0;
+                        rsp_tag_o[128*active_slot +: 128]     <= '0;
+                        rsp_counter_o[64*active_slot +: 64]   <=
+                            req_decrypt_i[active_slot]
+                            ? req_counter_i[64*active_slot +: 64] : 64'd0;
+                        rsp_auth_ok_o[active_slot] <= 1'b0;
+                        rsp_error_o[active_slot]   <= 1'b1;
+                        rsp_valid_o[active_slot]   <= 1'b1;
+                        state <= A_RESPONSE;
+                    end else begin
+                        engine_decrypt <= req_decrypt_i[active_slot];
+                        engine_key <= req_decrypt_i[active_slot]
+                                    ? rx_key[active_slot] : tx_key[active_slot];
+                        engine_nonce[31:0] <= req_decrypt_i[active_slot]
+                                               ? rx_prefix[active_slot]
+                                               : tx_prefix[active_slot];
+                        engine_nonce[95:32] <= pack64_be(
+                            req_decrypt_i[active_slot]
+                            ? req_counter_i[64*active_slot +: 64]
+                            : tx_counter[active_slot]);
+                        engine_aad <= '0;
+                        engine_aad[31:0] <= pack32_be(session_id[active_slot]);
+                        engine_aad[95:32] <= pack64_be(
+                            req_decrypt_i[active_slot]
+                            ? req_counter_i[64*active_slot +: 64]
+                            : tx_counter[active_slot]);
+                        engine_aad[103:96] <= req_data_len_i[8*active_slot +: 8];
+                        engine_data_in <= req_data_i[512*active_slot +: 512];
+                        engine_received_tag <= req_tag_i[128*active_slot +: 128];
+                        engine_start <= 1'b1;
+                        state <= A_WAIT_ENGINE;
                     end
                 end
 

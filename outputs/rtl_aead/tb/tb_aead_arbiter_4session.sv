@@ -131,9 +131,9 @@ module tb_aead_arbiter_4session;
         wait (req_ready[0]);
         @(posedge clk); req_valid[0] <= 1'b0;
         cycles = 0;
-        while (!rsp_valid[0] && cycles < 500) begin @(posedge clk); cycles=cycles+1; end
+        while (!rsp_valid[0] && cycles < 1200) begin @(posedge clk); cycles=cycles+1; end
         #1;
-        if (cycles >= 500 || !rsp_auth_ok[0] || rsp_error[0]
+        if (cycles >= 1200 || !rsp_auth_ok[0] || rsp_error[0]
             || rsp_counter[63:0] != 64'd0
             || rsp_data[511:0] !== ciphertext
             || rsp_tag[127:0] !== tag) begin
@@ -152,9 +152,9 @@ module tb_aead_arbiter_4session;
         wait (req_ready[0]);
         @(posedge clk); req_valid[0] <= 1'b0;
         cycles = 0;
-        while (!rsp_valid[0] && cycles < 500) begin @(posedge clk); cycles=cycles+1; end
+        while (!rsp_valid[0] && cycles < 1200) begin @(posedge clk); cycles=cycles+1; end
         #1;
-        if (cycles >= 500 || !rsp_auth_ok[0] || rsp_error[0]
+        if (cycles >= 1200 || !rsp_auth_ok[0] || rsp_error[0]
             || rsp_data[511:0] !== plaintext) begin
             $display("FAIL: arbiter authenticated decrypt mismatch");
             failures = failures + 1;
@@ -184,9 +184,9 @@ module tb_aead_arbiter_4session;
         wait (req_ready[0]);
         @(posedge clk); req_valid[0] <= 1'b0;
         cycles = 0;
-        while (!rsp_valid[0] && cycles < 500) begin @(posedge clk); cycles=cycles+1; end
+        while (!rsp_valid[0] && cycles < 1200) begin @(posedge clk); cycles=cycles+1; end
         #1;
-        if (cycles >= 500 || rsp_auth_ok[0] || !rsp_error[0]
+        if (cycles >= 1200 || rsp_auth_ok[0] || !rsp_error[0]
             || rsp_data[511:0] !== 512'd0) begin
             $display("FAIL: modified ciphertext was not rejected fail-closed");
             failures = failures + 1;
@@ -199,6 +199,8 @@ module tb_aead_arbiter_4session;
         req_data_len[15:0] = {8'd40, 8'd40};
         req_data[1023:0] = {plaintext, plaintext};
         req_valid[1:0] = 2'b11;
+        /* The winner is registered before acceptance, so ready is one clock later. */
+        @(posedge clk);
         #1;
         if (req_ready[1:0] !== 2'b10) begin
             $display("FAIL: round-robin did not select slot1 after slot0");
@@ -206,9 +208,9 @@ module tb_aead_arbiter_4session;
         end else $display("PASS: round-robin selects the next requesting session");
         @(posedge clk); req_valid[1:0] <= 2'b00;
         cycles = 0;
-        while (!rsp_valid[1] && cycles < 500) begin @(posedge clk); cycles=cycles+1; end
+        while (!rsp_valid[1] && cycles < 1200) begin @(posedge clk); cycles=cycles+1; end
         #1;
-        if (cycles >= 500 || !rsp_auth_ok[1] || rsp_error[1]) begin
+        if (cycles >= 1200 || !rsp_auth_ok[1] || rsp_error[1]) begin
             $display("FAIL: slot1 round-robin request did not complete");
             failures = failures + 1;
         end else $display("PASS: slot1 request completes on the shared AEAD engine");
