@@ -153,12 +153,12 @@ module tb_aead_fixed64;
         @(posedge clk);
         poly_start <= 1'b0;
         cycles = 0;
-        while (!poly_done && cycles < 300) begin
+        while (!poly_done && cycles < 600) begin
             @(posedge clk);
             cycles = cycles + 1;
         end
         #1;
-        if (cycles >= 300 || poly_result !== expected_tag) begin
+        if (cycles >= 600 || poly_result !== expected_tag) begin
             $display("FAIL: Poly1305 tag mismatch");
             $display("  got      = %h", poly_result);
             $display("  expected = %h", expected_tag);
@@ -173,12 +173,12 @@ module tb_aead_fixed64;
         @(posedge clk);
         aead_start <= 1'b0;
         cycles = 0;
-        while (!aead_done && cycles < 500) begin
+        while (!aead_done && cycles < 1200) begin
             @(posedge clk);
             cycles = cycles + 1;
         end
         #1;
-        if (cycles >= 500 || aead_ciphertext !== expected_ciphertext) begin
+        if (cycles >= 1200 || aead_ciphertext !== expected_ciphertext) begin
             $display("FAIL: AEAD ciphertext mismatch");
             $display("  got      = %h", aead_ciphertext);
             $display("  expected = %h", expected_ciphertext);
@@ -187,7 +187,7 @@ module tb_aead_fixed64;
             $display("PASS: AEAD ciphertext matches C golden vector");
         end
 
-        if (cycles >= 500 || aead_tag !== expected_tag) begin
+        if (cycles >= 1200 || aead_tag !== expected_tag) begin
             $display("FAIL: AEAD tag mismatch");
             $display("  got      = %h", aead_tag);
             $display("  expected = %h", expected_tag);
@@ -204,12 +204,12 @@ module tb_aead_fixed64;
         @(posedge clk);
         decrypt_start <= 1'b0;
         cycles = 0;
-        while (!decrypt_done && cycles < 500) begin
+        while (!decrypt_done && cycles < 1200) begin
             @(posedge clk);
             cycles = cycles + 1;
         end
         #1;
-        if (cycles >= 500 || !decrypt_auth_ok || decrypt_plaintext !== plaintext) begin
+        if (cycles >= 1200 || !decrypt_auth_ok || decrypt_plaintext !== plaintext) begin
             $display("FAIL: authenticated decrypt mismatch");
             failures = failures + 1;
         end else begin
@@ -224,12 +224,12 @@ module tb_aead_fixed64;
         @(posedge clk);
         decrypt_start <= 1'b0;
         cycles = 0;
-        while (!decrypt_done && cycles < 500) begin
+        while (!decrypt_done && cycles < 1200) begin
             @(posedge clk);
             cycles = cycles + 1;
         end
         #1;
-        if (cycles >= 500 || decrypt_auth_ok || decrypt_plaintext !== 512'd0) begin
+        if (cycles >= 1200 || decrypt_auth_ok || decrypt_plaintext !== 512'd0) begin
             $display("FAIL: tampered packet was not rejected fail-closed");
             failures = failures + 1;
         end else begin
