@@ -48,11 +48,15 @@ module aead_traffic_axi_lite_frontend #(
     assign s_axi_awready=rst_ni&&!aw_hold&&!s_axi_bvalid;
     assign s_axi_wready=rst_ni&&!w_hold&&!s_axi_bvalid;assign s_axi_bresp=0;
     assign s_axi_arready=rst_ni&&!s_axi_rvalid;assign s_axi_rresp=0;
+    /* Only the granted slot's payload is ever read by the arbiter, and only
+       slot_q can be granted because req_valid_o carries a single bit.  The wide
+       request buses therefore carry the same value on every slot position:
+       broadcasting keeps slot_q off the 2048-bit path and lets the arbiter's
+       slot mux collapse away. */
     always_comb begin
-      req_valid_o=0;req_decrypt_o=0;req_data_len_o=0;req_counter_o=0;req_data_o=0;req_tag_o=0;
-      if(pending)begin req_valid_o[slot_q]=1;req_decrypt_o[slot_q]=decrypt_q;
-        req_data_len_o[8*slot_q+:8]=length_q;req_counter_o[64*slot_q+:64]=counter_q;
-        req_data_o[512*slot_q+:512]=data_q;req_tag_o[128*slot_q+:128]=tag_q;end
+      req_valid_o=0;if(pending)req_valid_o[slot_q]=1;
+      req_decrypt_o={4{decrypt_q}};req_data_len_o={4{length_q}};
+      req_counter_o={4{counter_q}};req_data_o={4{data_q}};req_tag_o={4{tag_q}};
       rsp_ready_o=0;if(inflight)rsp_ready_o[slot_q]=1;
     end
     always_comb begin

@@ -19,7 +19,11 @@ module mlkem_shared_hash_engine(
     typedef enum logic[4:0]{IDLE,HSTART,NEXT_IN,MEM_REQ,MEM_WAIT,MEM_CAP,FEED,
         FINAL,OUT,CHECK,W0,W1,NWRITE,DRAIN,DONE}st_t;st_t state;
     logic[2:0]cmd;logic[255:0]d0,d1;logic[31:0]sid;logic[7:0]x,y,nonce;
-    logic eta;logic[3:0]slot;integer in_index,input_len,out_index,byte_count,coeff_count,write_index;
+    logic eta;logic[3:0]slot;
+    /* Widths follow the actual ranges: feeding these as 32-bit integers builds a
+       32-bit decoder in front of every byte-indexed write below. */
+    logic[10:0]in_index,input_len;logic[6:0]out_index;logic[1:0]byte_count;
+    logic[7:0]coeff_count;logic[2:0]write_index;
     logic[31:0]group;logic[7:0]inbyte,obyte,mem_byte;logic hs,hfin,iready,oval,hdone,oready;
     logic[1:0]mode;logic[15:0]out_len;logic[11:0]rv0,rv1;logic rok0,rok1,hash_finished;
     logic signed[127:0]e2;logic signed[63:0]e3;
@@ -29,10 +33,10 @@ module mlkem_shared_hash_engine(
         .output_length_i(out_len),.input_byte_i(inbyte),.input_valid_i(state==FEED),
         .input_ready_o(iready),.finalize_i(hfin),.output_byte_o(obyte),
         .output_valid_o(oval),.output_ready_i(oready),.busy_o(),.done_o(hdone));
-    function automatic logic memory_input(input logic[2:0]c,input integer n);
+    function automatic logic memory_input(input logic[2:0]c,input logic[10:0]n);
         begin memory_input=(c==C_HPK)||((c==C_J)&&(n>=32))||
             ((c==C_TRANSCRIPT)&&(n<1568));end endfunction
-    function automatic[7:0]domain_byte(input integer n);begin case(n)
+    function automatic[7:0]domain_byte(input logic[10:0]n);begin case(n)
         0:domain_byte="Z";1:domain_byte="Y";2:domain_byte="N";3:domain_byte="Q";
         4:domain_byte="-";5:domain_byte="P";6:domain_byte="Q";7:domain_byte="C";
         8:domain_byte="-";9:domain_byte="v";default:domain_byte="1";endcase end endfunction
@@ -74,9 +78,9 @@ module mlkem_shared_hash_engine(
               x<=x_i;y<=y_i;nonce<=nonce_i;eta<=eta3_i;slot<=dst_slot_i;
               in_index<=0;out_index<=0;byte_count<=0;coeff_count<=0;write_index<=0;
               group<=0;digest_o<=0;error_o<=0;hash_finished<=0;
-              case(command_i)C_HPK:input_len<=800;C_G:input_len<=64;C_J:input_len<=800;
-                C_MATRIX:input_len<=34;C_NOISE:input_len<=33;C_TRANSCRIPT:input_len<=1572;
-                default:input_len<=75;endcase state<=HSTART;end
+              case(command_i)C_HPK:input_len<=11'd800;C_G:input_len<=11'd64;C_J:input_len<=11'd800;
+                C_MATRIX:input_len<=11'd34;C_NOISE:input_len<=11'd33;C_TRANSCRIPT:input_len<=11'd1572;
+                default:input_len<=11'd75;endcase state<=HSTART;end
           HSTART:state<=NEXT_IN;
           NEXT_IN:begin
               if(in_index==input_len)state<=FINAL;
@@ -96,24 +100,24 @@ module mlkem_shared_hash_engine(
           end
           MEM_REQ:state<=MEM_WAIT;MEM_WAIT:state<=MEM_CAP;
           MEM_CAP:begin inbyte<=mem_byte;state<=FEED;end
-          FEED:if(iready)begin in_index<=in_index+1;state<=NEXT_IN;end
+          FEED:if(iready)begin in_index<=in_index+11'd1;state<=NEXT_IN;end
           FINAL:begin out_index<=0;byte_count<=0;group<=0;state<=OUT;end
           OUT:if(oval)begin
               if(cmd==C_MATRIX||cmd==C_NOISE)begin group[8*byte_count+:8]<=obyte;
-                  if(byte_count==(cmd==C_MATRIX?2:(eta?2:3)))begin byte_count<=0;
+                  if(byte_count==(cmd==C_MATRIX?2'd2:(eta?2'd2:2'd3)))begin byte_count<=0;
                       write_index<=0;state<=cmd==C_MATRIX?CHECK:NWRITE;end
-                  else byte_count<=byte_count+1;end
-              else begin digest_o[8*out_index+:8]<=obyte;if(out_index<71)out_index<=out_index+1;
+                  else byte_count<=byte_count+2'd1;end
+              else begin digest_o[8*out_index+:8]<=obyte;if(out_index<7'd71)out_index<=out_index+7'd1;
                   if(hdone)state<=DONE;end
           end else if(hdone)begin if(cmd==C_MATRIX&&coeff_count<256)error_o<=1;state<=DONE;end
           CHECK:if(rok0)state<=W0;else if(rok1)state<=W1;else state<=OUT;
-          W0:begin if(coeff_count==255)state<=DRAIN;else begin coeff_count<=coeff_count+1;
+          W0:begin if(coeff_count==255)state<=DRAIN;else begin coeff_count<=coeff_count+8'd1;
               state<=rok1?W1:OUT;end end
-          W1:begin if(coeff_count==255)state<=DRAIN;else begin coeff_count<=coeff_count+1;state<=OUT;end end
+          W1:begin if(coeff_count==255)state<=DRAIN;else begin coeff_count<=coeff_count+8'd1;state<=OUT;end end
           NWRITE:begin
-              if(coeff_count==255)state<=DRAIN;else begin coeff_count<=coeff_count+1;
-                  if(write_index==(eta?3:7))begin write_index<=0;state<=OUT;end
-                  else write_index<=write_index+1;end end
+              if(coeff_count==255)state<=DRAIN;else begin coeff_count<=coeff_count+8'd1;
+                  if(write_index==(eta?3'd3:3'd7))begin write_index<=0;state<=OUT;end
+                  else write_index<=write_index+3'd1;end end
           DRAIN:if(hdone||hash_finished)state<=DONE;
           DONE:state<=IDLE;default:state<=IDLE;
           endcase

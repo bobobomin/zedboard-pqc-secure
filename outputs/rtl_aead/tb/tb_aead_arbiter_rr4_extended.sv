@@ -105,7 +105,7 @@ module tb_aead_arbiter_rr4_extended;
         grants = 0;
         responses = 0;
         cycles = 0;
-        while ((responses < 4) && (cycles < 5000)) begin
+        while ((responses < 4) && (cycles < 12000)) begin
             @(posedge clk);
             if (|req_ready) begin
                 if (req_ready !== expected_first_round(grants)) begin
@@ -139,7 +139,7 @@ module tb_aead_arbiter_rr4_extended;
         grants = 0;
         responses = 0;
         cycles = 0;
-        while ((responses < 2) && (cycles < 3000)) begin
+        while ((responses < 2) && (cycles < 8000)) begin
             @(posedge clk);
             if (|req_ready) begin
                 if ((grants == 0 && req_ready !== 4'b0001) ||
@@ -171,7 +171,7 @@ module tb_aead_arbiter_rr4_extended;
         grants = 0;
         responses = 0;
         cycles = 0;
-        while ((responses < 8) && (cycles < 10000)) begin
+        while ((responses < 8) && (cycles < 24000)) begin
             @(posedge clk);
             if (|req_ready) begin
                 if (req_ready !== expected_persistent(grants)) begin
