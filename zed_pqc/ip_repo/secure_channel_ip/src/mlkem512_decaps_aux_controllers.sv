@@ -8,7 +8,7 @@ module mlkem512_unpack_public_controller(
     output logic poly_we_o,output logic[11:0]poly_addr_o,
     output logic[15:0]poly_wdata_o,
     output logic[255:0]rho_o,output logic[255:0]hpk_o,output logic[255:0]z_o);
-    typedef enum logic[3:0]{IDLE,REQ,WAIT,CAPTURE,WRITE0,WRITE1,META_NEXT,DONE}st_t;
+    typedef enum logic[3:0]{IDLE,REQ,WAIT,WRITE0,WRITE1,META_NEXT,DONE}st_t;
     st_t state;logic[10:0]byte_index;logic[1:0]byte_phase;integer group_index;
     logic[23:0]group;logic[31:0]coeffs;
     logic[7:0]selected_byte;
@@ -29,8 +29,10 @@ module mlkem512_unpack_public_controller(
             rho_o<=0;hpk_o<=0;z_o<=0;end else case(state)
             IDLE:if(start_i)begin byte_index<=768;byte_phase<=0;group_index<=0;group<=0;
                 rho_o<=0;hpk_o<=0;z_o<=0;state<=REQ;end
-            REQ:state<=WAIT;WAIT:state<=CAPTURE;
-            CAPTURE:begin
+            REQ:state<=WAIT;
+            /* sk_rdata_i is valid in WAIT for the synchronous read issued
+               in REQ, so capture it without an extra CAPTURE state. */
+            WAIT:begin
                 if(byte_index<1536)begin
                     group[8*byte_phase+:8]<=selected_byte;
                     byte_index<=byte_index+1;
@@ -78,8 +80,8 @@ module mlkem512_pack_compare_controller(
     output logic busy_o,output logic done_o,output logic mismatch_o,
     output logic[11:0]poly_addr_o,input logic[15:0]poly_rdata_i,
     output logic[7:0]ct_addr_o,input logic[31:0]ct_rdata_i);
-    typedef enum logic[3:0]{IDLE,P_REQ,P_WAIT,P_CAP,C_PREP,C_REQ,C_WAIT,
-        C_CHECK,NEXT_GROUP,DONE}st_t;st_t state;
+    typedef enum logic[3:0]{IDLE,P_REQ,P_WAIT,C_PREP,C_REQ,C_WAIT,
+        NEXT_GROUP,DONE}st_t;st_t state;
     integer group_index,coeff_index,byte_index;logic mode;logic[3:0]slot;
     logic[9:0]base;logic[63:0]coeffs;logic[39:0]d10_bytes;logic[7:0]d4_byte;
     logic[7:0]expected,generated;logic mismatch,mismatch_bar;
@@ -103,13 +105,15 @@ module mlkem512_pack_compare_controller(
             IDLE:if(start_i)begin group_index<=0;coeff_index<=0;byte_index<=0;
                 mode<=mode_d4_i;slot<=src_slot_i;base<=ct_base_i;coeffs<=0;
                 if(clear_i)begin mismatch<=0;mismatch_bar<=1;end state<=P_REQ;end
-            P_REQ:state<=P_WAIT;P_WAIT:state<=P_CAP;
-            P_CAP:begin coeffs[16*coeff_index+:16]<=poly_rdata_i;
+            P_REQ:state<=P_WAIT;
+            /* Capture the synchronous polynomial RAM output in P_WAIT. */
+            P_WAIT:begin coeffs[16*coeff_index+:16]<=poly_rdata_i;
                 if(coeff_index==(mode?1:3))begin coeff_index<=0;state<=C_PREP;end
                 else begin coeff_index<=coeff_index+1;state<=P_REQ;end end
             C_PREP:begin byte_index<=0;state<=C_REQ;end
-            C_REQ:state<=C_WAIT;C_WAIT:state<=C_CHECK;
-            C_CHECK:begin mismatch<=mismatch|(expected!=generated);
+            C_REQ:state<=C_WAIT;
+            /* Compare the synchronous ciphertext RAM output in C_WAIT. */
+            C_WAIT:begin mismatch<=mismatch|(expected!=generated);
                 mismatch_bar<=mismatch_bar&(expected==generated);
                 if(byte_index==(mode?0:4))state<=NEXT_GROUP;
                 else begin byte_index<=byte_index+1;state<=C_REQ;end end

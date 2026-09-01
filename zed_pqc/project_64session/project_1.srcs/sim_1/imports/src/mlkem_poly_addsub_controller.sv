@@ -49,16 +49,19 @@ module mlkem_poly_tomsg_controller(
     output logic busy_o,output logic done_o,output logic[11:0]poly_addr_o,
     input logic[15:0]poly_rdata_i,output logic[255:0]message_o);
     typedef enum logic[2:0]{IDLE,READ,WAIT,DONE}st_t;st_t state;
-    integer index;logic[3:0]slot;logic[31:0]p;
+    integer index;logic[3:0]slot;logic message_bit;
+    /* Compress_1(x)=round(2x/q) mod 2 is 1 exactly on 833<=x<=2496 for
+       canonical x in [0,3328].  Keep the two-cycle RAM schedule while
+       replacing the old 16x32 constant multiply with two comparisons. */
     always_comb begin poly_addr_o=slot*256+index;busy_o=state!=IDLE;done_o=state==DONE;
-        p=poly_rdata_i*32'd1290168+32'h40000000;end
+        message_bit=(poly_rdata_i>=16'd833)&&(poly_rdata_i<=16'd2496);end
     always_ff @(posedge clk_i or negedge rst_ni)begin
         if(!rst_ni)begin state<=IDLE;index<=0;slot<=0;message_o<=0;end
         else case(state)
             IDLE:if(start_i)begin slot<=src_slot_i;index<=0;message_o<=0;state<=READ;end
             READ:state<=WAIT;
             /* poly_rdata_i is valid in WAIT for the synchronous RAM read. */
-            WAIT:begin message_o[index]<=p[31];if(index==255)state<=DONE;
+            WAIT:begin message_o[index]<=message_bit;if(index==255)state<=DONE;
                 else begin index<=index+1;state<=READ;end end
             DONE:state<=IDLE;default:state<=IDLE;
         endcase

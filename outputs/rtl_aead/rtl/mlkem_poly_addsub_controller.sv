@@ -89,3 +89,36 @@ module mlkem_poly_addsub_controller(
         endcase
     end
 endmodule
+
+module mlkem_poly_tomsg_controller(
+    input logic clk_i,input logic rst_ni,input logic start_i,input logic[3:0]src_slot_i,
+    output logic busy_o,output logic done_o,output logic[11:0]poly_addr_o,
+    input logic[15:0]poly_rdata_i,output logic[255:0]message_o);
+    typedef enum logic[2:0]{IDLE,READ,WAIT,DONE}st_t;st_t state;
+    integer index;logic[3:0]slot;logic[31:0]p;
+
+    always_comb begin
+        poly_addr_o=slot*256+index;
+        busy_o=state!=IDLE;
+        done_o=state==DONE;
+        p=poly_rdata_i*32'd1290168+32'h40000000;
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni)begin
+        if(!rst_ni)begin
+            state<=IDLE; index<=0; slot<=0; message_o<=0;
+        end else case(state)
+            IDLE:if(start_i)begin
+                slot<=src_slot_i; index<=0; message_o<=0; state<=READ;
+            end
+            READ:state<=WAIT;
+            WAIT:begin
+                message_o[index]<=p[31];
+                if(index==255) state<=DONE;
+                else begin index<=index+1; state<=READ; end
+            end
+            DONE:state<=IDLE;
+            default:state<=IDLE;
+        endcase
+    end
+endmodule

@@ -1,216 +1,130 @@
-# ZedBoard PQC Secure Channel
+# ZedBoard 기반 다중 세션 양자내성암호 보안채널 가속기
 
-AMD Zynq-7000 ZedBoard(`XC7Z020-1CLG484`)를 대상으로 만든 연구·교육용 PQC 보안 통신 프로토타입입니다. Zynq PS는 Ethernet/UART와 소프트웨어 제어를 담당하고, PL은 ML-KEM-512 decapsulation과 ChaCha20-Poly1305 AEAD를 가속합니다.
+> 차량–기지국 연결을 모사한 ML-KEM-512 및 ChaCha20-Poly1305 하드웨어 구현
+
+## 프로젝트 개요
+
+이 프로젝트는 Zynq-7000 기반 ZedBoard에서 양자내성 키 설정과 대칭키 보안 통신을 하나의 하드웨어 시스템으로 구현한다. 이동 차량이 새로운 기지국 영역에 진입해 보안 세션을 설정하는 상황을 응용 모델로 삼았으며, 최대 64개 세션을 서로 독립적으로 관리한다.
+
+실제 검증 환경에서는 PC 클라이언트가 차량·단말 역할을, ZedBoard PS가 기지국 제어부 역할을 수행한다. PC와 PS는 UART로 통신하며, PL은 ML-KEM-512 Decapsulation, SHA3/SHAKE, ChaCha20-Poly1305 및 세션 상태 관리를 가속한다. 실제 이동통신 핸드오버 전체를 구현한 것은 아니며, 그 과정에 필요한 키 설정·세션 관리·데이터 보호 기능을 단순화해 검증했다.
 
 ## 시스템 구성
 
 ```text
-PC clients
-    |
-    | Ethernet (최종 통합 예정)
-    v
-Zynq PS / Cortex-A9
-    |- UART 로그
-    |- 세션 및 네트워크 제어
-    `- AXI4-Lite
-         |- 0x43C0_0000 : AEAD
-         `- 0x43C1_0000 : ML-KEM
-                    |
-                    v
-Zynq PL
-    |- ML-KEM-512 decapsulation
-    |- shared SHA3/SHAKE (Keccak)
-    |- ChaCha20-Poly1305
-    |- 64-session BRAM table / indexed request port
-    `- fault detection / fail-closed protection
+PC 클라이언트(차량/단말 모사)
+        │ UART
+        ▼
+Zynq PS / Cortex-A9(기지국 제어부 모사)
+        │ AXI4-Lite
+        ▼
+Zynq PL 보안 가속기
+ ├─ ML-KEM-512 Decapsulation
+ ├─ Shared Keccak: SHA3/SHAKE
+ ├─ ChaCha20-Poly1305
+ ├─ 64-session BRAM table
+ └─ Fault detection / fail-closed control
 ```
 
-현재 RTL은 **64개의 논리 세션**을 지원하며 암호 연산 엔진 하나를 공유합니다. 세션 상태는 PL의 BRAM에 저장하고, 요청 순서는 PS의 준비 비트맵 기반 round-robin 스케줄러가 결정합니다. 기존 4세션 RTL은 회귀 비교용으로 남겨 두었습니다.
+## 핵심 기능
 
-## 구현된 기능
+- ML-KEM-512 Decapsulation 및 세션 키 설치
+- NTT, INTT, BaseMul 및 SHA3/SHAKE 하드웨어 처리
+- 64-byte 고정 패킷용 ChaCha20-Poly1305 송수신
+- 최대 64개 세션의 키·카운터·상태 독립 관리
+- 잘못된 태그, 재전송, 범위 밖 슬롯 및 변조된 ML-KEM 암호문 거부
+- 해시 스케줄 감시, watchdog, dual-rail 및 출력 제어 기반 fail-closed 동작
 
-- ML-KEM-512 전체 decapsulation
-  - NTT, INTT, BaseMul
-  - 샘플링과 행렬 생성
-  - 다항식 압축·해제 및 직렬화·역직렬화
-  - 재암호화 및 ciphertext 전체 비교
-  - 실패 시 대체 비밀 선택
-- 공유 Keccak datapath 기반 SHA3/SHAKE
-- ML-KEM 공유 비밀에서 방향별 traffic material 생성
-- ChaCha20-Poly1305 고정 64-byte AEAD 패킷 처리
-- 세션별 TX/RX key, nonce prefix, packet counter 분리
-- Poly1305 인증 실패 시 plaintext 차단
-- 64개 세션 BRAM 저장 및 6-bit indexed slot 처리
-- PS용 64세션 event-driven round-robin 스케줄러
-- AXI4-Lite 기반 PS-PL 제어
-- ciphertext, counter, session key 및 출력 제어 경로 fault protection
-
-## 검증 상태
-
-보드 없이 수행한 RTL 회귀 테스트에서 다음 항목을 검증했습니다.
-
-- ChaCha20 및 Poly1305 표준/골든 벡터
-- AEAD encrypt/decrypt 및 변조 tag 거부
-- SHA3/SHAKE
-- NTT, INTT, BaseMul 개별 연산
-- K-PKE decrypt/reencrypt
-- ML-KEM-512 전체 decapsulation
-- 변조된 ML-KEM ciphertext 거부
-- 공유 Keccak 및 dual AXI 인터페이스
-- fault injection과 fail-closed 동작
-- PS Bring-up 프로그램 ARM 빌드 및 ELF 링크
-
-실제 ZedBoard에서의 PS-PL 하드웨어 검증과 Ethernet 통신은 아직 남아 있습니다.
-
-## 타이밍 최적화 및 구현 결과
-
-BaseMul을 다중 사이클화하고 NTT/INTT의 Montgomery/Barrett 연산을 파이프라인화했습니다.
-
-| 단계 | WNS | TNS | Setup 실패 endpoint |
-|---|---:|---:|---:|
-| 최초 구현 | -15.607 ns | -2554.274 ns | 1460 |
-| BaseMul 수정 후 | -1.611 ns | -74.895 ns | 64 |
-| NTT/INTT 수정 후(4세션) | +0.215 ns | 0 ns | 0 |
-| **64세션 BRAM 구조** | **+0.282 ns** | **0 ns** | **0** |
-
-64세션 설계는 Vivado 2020.2에서 전체 합성·구현·배선을 완료했으며 50 MHz timing constraint를 만족합니다. Hold slack은 `+0.015 ns`, THS는 `0 ns`, setup/hold 실패 endpoint와 routing error는 모두 0개입니다.
-
-### XC7Z020 64세션 post-synthesis 결과
-
-| Resource | Used | Available | Utilization |
-|---|---:|---:|---:|
-| Slice LUT | 29,598 | 53,200 | 55.64% |
-| Slice Register | 26,158 | 106,400 | 24.58% |
-| BRAM Tile | 9 | 140 | 6.43% |
-
-### XC7Z020 64세션 post-implementation 결과
-
-| Resource | Used | Available | Utilization |
-|---|---:|---:|---:|
-| LUT | 29,777 | 53,200 | 55.97% |
-| LUTRAM | 62 | 17,400 | 0.36% |
-| FF | 26,845 | 106,400 | 25.23% |
-| BRAM | 9 | 140 | 6.43% |
-| DSP | 61 | 220 | 27.73% |
-| BUFG | 2 | 32 | 6.25% |
-
-Vivado methodology report에는 DSP/BRAM 파이프라인 관련 warning이 남아 있지만, 구현·배선·timing을 막는 error 또는 critical warning은 확인되지 않았습니다.
-
-64세션 테이블은 `1,536 × 32-bit` 상태 메모리로 구성되며 `RAMB36E1 2개`로 추론되었다. 기존 4세션 대비 LUT와 FF 사용량을 줄이면서 64세션 동시 처리를 지원한다.
-
-## 64세션 통합본 합성·구현 결과
-
-PR #2 타이밍 파이프라인과 후속 사이클 최적화를 반영한 64세션 ML-KEM Secure Channel 설계의 Vivado 검증 결과이다.
-
-### 검증 결과
+## 최종 검증 결과
 
 | 항목 | 결과 |
-|---|---:|
-| 전체 ML-KEM decapsulation 테스트 | PASS |
-| 총 decapsulation 지연 | 104,245 cycles |
-| CORE decapsulation | 97,364 cycles |
-| 목표 클록 | 50 MHz |
-| 타이밍 제약 | 모두 만족 |
+| --- | ---: |
+| Vivado 버전 | 2020.2 |
+| PL 클록 | **100 MHz** |
+| ML-KEM 총 지연 | **105,286 cycles** |
+| 순수 PL 처리시간 | **약 1,052.9 μs** |
+| 실제 보드 ML-KEM 서비스 시간 | **약 1,114 μs** |
+| 64개 세션 설치 및 사용 | **64/64 PASS** |
+| 전체 PS–PL 보드 검증 | **PASS** |
 
-### 구현 후 자원 사용량
+초기 50 MHz 설계의 148,093 cycles와 비교하면 사이클 수는 42,807 cycles, 약 28.9% 감소했다. 클록 향상까지 포함한 순수 처리시간은 약 2,961.9 μs에서 1,052.9 μs로 약 64.5% 단축되었다.
 
-| 자원 | 사용량 |
-|---|---:|
-| LUT | 29,876 |
-| FF | 27,045 |
-| BRAM | 9 |
-| DSP | 59 |
+## PS 소프트웨어와의 비교
 
-### 타이밍 요약
+동일한 ZedBoard Cortex-A9에서 측정했다. Debug 결과는 최적화되지 않은 참고값이며, 공정한 주 비교 기준은 Release `-O2`이다. PL 측정값에는 AXI 제어 오버헤드가 포함된다.
+
+| 작업 | PS SW Debug | PS SW Release `-O2` | PL HW |
+| --- | ---: | ---: | ---: |
+| ML-KEM-512 Decapsulation | 5,291.255 μs | **1,258.523 μs** | **1,114 μs** |
+| ChaCha20-Poly1305 Encrypt 64B | 50.869 μs | **6.723 μs** | 21 μs |
+| ChaCha20-Poly1305 Decrypt 64B | 52.016 μs | **6.886 μs** | 21–22 μs |
+
+ML-KEM은 최적화된 PS 소프트웨어보다 PL이 약 1.13배 빠르며, 최적화되지 않은 Debug 소프트웨어보다 약 4.75배 빠르다. 반면 64-byte AEAD는 `-O2` 소프트웨어가 더 빠르다. 현재 PL의 Poly1305가 DSP 사용량을 줄이기 위해 곱셈기를 직렬 재사용하고 있고, 짧은 패킷에서는 AXI 및 상태 제어 오버헤드의 비중이 크기 때문이다.
+
+## 구현 결과
+
+### 타이밍
 
 | 항목 | 결과 |
-|---|---:|
-| WNS | +0.612 ns |
-| TNS | 0.000 ns |
-| WHS | +0.019 ns |
-| 설정 주파수 | 50 MHz (20 ns period) |
-| 타이밍 상태 | PASS |
+| --- | ---: |
+| Clock period | 10 ns |
+| WNS | **+0.105 ns** |
+| TNS | **0.000 ns** |
+| WHS | **+0.007 ns** |
+| Setup/Hold 위반 | **0 / 0** |
 
-### 주요 최악 경로
+### 자원 및 전력
 
-| 우선순위 | 경로/블록 | 지연 |
-|---:|---|---:|
-| 1 | Poly1305 accumulation | 18.800 ns |
-| 2 | SHA3/Hash | 16.447 ns |
-| 3 | POLY→MESSAGE | 17.272 ns |
-| 4 | Public-key unpack | 14.728 ns |
-| 5 | Pack/Compare | 11.992 ns |
-| 6 | Poly bridge | 11.720 ns |
-| 7 | ML-KEM Poly Add/Sub | 9.913 ns |
-| 8 | ML-KEM BaseMul | 약 7.6 ns |
+| 항목 | 결과 |
+| --- | ---: |
+| LUT | **24,081** |
+| FF | **25,727** |
+| BRAM Tile | **9** |
+| DSP | **51** |
+| Total On-Chip Power | **2.323 W** |
+| Junction Temperature | **51.8 °C** |
 
-PR #2의 Barrett reduction 및 BaseMul 파이프라인과 후속 데이터 이동 최적화를 적용한 결과, 총 decapsulation 지연이 148,093 cycles에서 104,245 cycles로 감소했다. 50 MHz 구현 타이밍은 만족하며, 100 MHz 목표에서는 Poly1305와 SHA3/Hash 경로를 우선적으로 최적화한다.
+전력 값은 Vivado 구현 후 추정치이며 실제 계측값이 아니다.
 
-## 디렉터리
+## 64세션 보드 검증 항목
 
-- `outputs/golden_reference`: PC용 C golden reference와 테스트 벡터
-- `outputs/rtl_aead/rtl`: SystemVerilog RTL 원본
-- `outputs/rtl_aead/tb`: 단위·통합·공격 테스트벤치
-- `outputs/rtl_aead/ps_driver`: PS 드라이버, Bring-up 프로그램, KAT 벡터
-- `zed_pqc/ip_repo/secure_channel_ip`: Vivado 패키징용 custom IP
-- `zed_pqc/project_1`: ZedBoard Vivado 프로젝트와 Block Design
-- `zed_pqc/build_vitis.tcl`: Vitis workspace 재생성 보조 스크립트
+- 0–63번 슬롯 전체에 ML-KEM 세션 설치 및 사용
+- 세션 ID별 트래픽 키 분리
+- 슬롯별 TX counter 독립성 및 초기값 확인
+- 슬롯 재사용 시 기존 사용자의 상태 제거와 counter 초기화
+- 범위 밖 슬롯 64 거부
+- 세션 leave/rejoin 반복 시험
+- 정상 암복호화, 태그 변조 및 replay 거부
 
-Vivado/Vitis 자동 생성 폴더, bitstream, XSA, ELF 및 로컬 archive는 저장소에서 제외될 수 있습니다. 필요한 산출물은 각 PC에서 다시 생성합니다.
-
-## Vivado 프로젝트 재생성
-
-권장 도구 버전은 Vivado/Vitis 2020.2입니다.
-
-1. `zed_pqc/project_1/project_1.xpr`을 엽니다.
-2. IP repository가 `zed_pqc/ip_repo`를 가리키는지 확인합니다.
-3. Report IP Status에서 custom IP가 최신 revision인지 확인합니다.
-4. `system.bd`의 Output Products를 다시 생성합니다.
-5. Validate Design을 실행합니다.
-6. Run Synthesis와 Run Implementation을 실행합니다.
-7. post-route Timing Summary에서 `WNS >= 0`, `TNS = 0`인지 확인합니다.
-8. Generate Bitstream을 실행합니다.
-9. bitstream을 포함하여 `system_wrapper.xsa`를 export합니다.
-
-## ZedBoard에서 남은 작업
-
-### 1. 장비 준비
-
-- ZedBoard 전원 공급 및 JTAG boot mode 설정
-- JTAG/Programming USB 연결
-- USB-UART 연결 및 `115200-8-N-1` 터미널 준비
-- Ethernet 데모 단계에서는 PC와 ZedBoard Ethernet 연결
-- 노트북에 Vivado/Vitis 2020.2, Zynq-7000 device support, cable driver 설치
-
-### 2. PS-PL Bring-up
-
-1. Vivado Hardware Manager 또는 Vitis에서 FPGA를 program합니다.
-2. export한 XSA로 Vitis standalone platform을 생성합니다.
-3. `outputs/rtl_aead/ps_driver`의 드라이버와 Bring-up 소스를 application에 추가합니다.
-4. Cortex-A9용 `zed_pqc_bringup.elf`를 빌드하고 실행합니다.
-5. UART에서 각 KAT 결과를 확인합니다.
-
-전체 검사가 성공하면 마지막에 다음 문자열이 출력됩니다.
+## 저장소 구조
 
 ```text
-ALL PS-PL HARDWARE TESTS PASSED
+outputs/rtl_aead/rtl/                  독립 RTL 원본
+outputs/rtl_aead/tb/                   RTL 및 통합 테스트벤치
+outputs/rtl_aead/pc_tools/             PC UART 클라이언트
+outputs/rtl_aead/ps_driver/            Zynq PS 드라이버와 보드 검증 코드
+outputs/golden_reference/              소프트웨어 기준 구현
+zed_pqc/ip_repo/secure_channel_ip/     Vivado 패키지 IP
+zed_pqc/project_64session/             Vivado 2020.2 최종 64세션 프로젝트
+docs/OPTIMIZATION.md                   타이밍·사이클 최적화 상세
 ```
 
-Bring-up은 AEAD 골든 결과 비교, 정상 복호화, tag 변조 거부, ML-KEM decapsulation, 세션 설치, ML-KEM ciphertext 변조 거부를 검사합니다.
+## Vivado 재현 절차
 
-### 3. 실제 Ethernet 데모
+1. Vivado 2020.2에서 `zed_pqc/project_64session/project_1.xpr`을 연다.
+2. IP Catalog에서 **Refresh All Repositories**를 실행한다.
+3. IP RTL을 수정했다면 `mlkem_secure_channel`을 **Edit in IP Packager**로 열고 **Re-Package IP**를 실행한다.
+4. Block Design에서 IP 상태를 확인하고 **Generate Output Products – Global**을 실행한다.
+5. `system_wrapper`를 top으로 설정한 뒤 Synthesis, Implementation, Generate Bitstream을 순서대로 실행한다.
+6. XSA를 내보내 Vitis 2020.2에서 PS–PL 보드 검증 프로그램을 실행한다.
 
-Bring-up 통과 후 다음 소프트웨어를 추가해야 합니다.
+시뮬레이션 복사본만 수정하면 XSim에는 반영되지만 Block Design의 패키지 IP 합성에는 반영되지 않을 수 있다. 최종 RTL 수정은 독립 RTL과 IP 저장소의 소스를 함께 동기화하고 반드시 IP를 재패키징해야 한다.
 
-- Zynq PS용 lwIP Ethernet 서버
-- PC용 ML-KEM/ChaCha20-Poly1305 클라이언트
-- 공개키 fingerprint 사전 등록 및 검증
-- handshake와 고정 64-byte packet protocol
-- `session_id`, counter, timeout 및 오류 처리
-- 먼저 PC 클라이언트 1개로 검증한 뒤 64개 논리 세션으로 확장
+## 상세 문서
 
-64명 데모용 RTL과 기본 PS 스케줄러는 준비되었습니다. 실제 데모에는 lwIP 연결별 slot 할당/회수, Ethernet RX 큐, timeout 및 연결 종료 시 세션 폐기 정책을 추가해야 합니다.
+- [타이밍 및 사이클 최적화 내역](docs/OPTIMIZATION.md)
+- [PS 드라이버 사용법](outputs/rtl_aead/ps_driver/README.md)
+- [RTL 구성](outputs/rtl_aead/rtl/README.md)
 
-## 주의
+## 범위와 한계
 
-이 저장소는 연구·교육용 프로토타입입니다. 기능 시뮬레이션과 구현 timing은 통과했지만 실제 보드 검증, 상호운용성 시험, side-channel 평가 및 제품 수준의 보안 검증은 아직 완료되지 않았습니다. 실제 서비스용 암호 시스템으로 사용하면 안 됩니다.
+본 프로젝트는 차량–기지국 보안 연결을 응용 모델로 사용했지만 상용 이동통신 프로토콜이나 실제 기지국 핸드오버를 구현한 것은 아니다. UART 기반 시험 환경에서 PQC 키 설정, 64세션 관리 및 데이터 보호 기능을 하드웨어로 검증한 연구용 프로토타입이다.

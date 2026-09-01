@@ -75,7 +75,7 @@ module mlkem_decaps_axi_lite_frontend #(
                         if(wstrb_q[1]&&wdata_q[8])begin done_latched<=0;fail_latched<=0;end
                         if(wstrb_q[0]&&wdata_q[0]&&!decap_busy_i)decap_start_o<=1;
                     end
-                    REG_SLOT:if(wstrb_q[0])decap_slot_o<=wdata_q[1:0];
+                    REG_SLOT:if(wstrb_q[0])decap_slot_o<=wdata_q[SLOT_WIDTH-1:0];
                     REG_SESSION:decap_session_id_o<=merge_bytes(decap_session_id_o,wdata_q,wstrb_q);
                     REG_MEM_REGION:if(wstrb_q[0])region<=wdata_q[1:0];
                     REG_MEM_ADDR:begin

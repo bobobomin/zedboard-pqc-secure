@@ -25,10 +25,18 @@ module mlkem_secure_channel_complete_axi_top #(
   logic[511:0]req_data,rsp_data;
   logic[127:0]req_tag,rsp_tag;
   logic rsp_valid,rsp_ready,rsp_auth,rsp_error;
+  (* ASYNC_REG="TRUE" *) logic[1:0]rst_sync_q;
+  logic rst_sync_n;
+
+  always_ff @(posedge aclk or negedge aresetn)
+    if(!aresetn) rst_sync_q<=2'b00;
+    else         rst_sync_q<={rst_sync_q[0],1'b1};
+
+  assign rst_sync_n=rst_sync_q[1];
 
   mlkem_secure_channel_fault_protected_indexed_axi_top #(
     .MAX_STAGE_CYCLES(MAX_STAGE_CYCLES),.NUM_SESSIONS(NUM_SESSIONS),.SLOT_WIDTH(SLOT_WIDTH)) core(
-    .s_axi_aclk(aclk),.s_axi_aresetn(aresetn),.s_axi_awaddr(m_awaddr),
+    .s_axi_aclk(aclk),.s_axi_aresetn(rst_sync_n),.s_axi_awaddr(m_awaddr),
     .s_axi_awvalid(m_awvalid),.s_axi_awready(m_awready),.s_axi_wdata(m_wdata),
     .s_axi_wstrb(m_wstrb),.s_axi_wvalid(m_wvalid),.s_axi_wready(m_wready),
     .s_axi_bresp(m_bresp),.s_axi_bvalid(m_bvalid),.s_axi_bready(m_bready),
@@ -43,7 +51,7 @@ module mlkem_secure_channel_complete_axi_top #(
 
   aead_traffic_indexed_axi_lite_frontend #(
     .NUM_SESSIONS(NUM_SESSIONS),.SLOT_WIDTH(SLOT_WIDTH)) traffic(
-    .clk_i(aclk),.rst_ni(aresetn),.s_axi_awaddr(a_awaddr),.s_axi_awvalid(a_awvalid),
+    .clk_i(aclk),.rst_ni(rst_sync_n),.s_axi_awaddr(a_awaddr),.s_axi_awvalid(a_awvalid),
     .s_axi_awready(a_awready),.s_axi_wdata(a_wdata),.s_axi_wstrb(a_wstrb),
     .s_axi_wvalid(a_wvalid),.s_axi_wready(a_wready),.s_axi_bresp(a_bresp),
     .s_axi_bvalid(a_bvalid),.s_axi_bready(a_bready),.s_axi_araddr(a_araddr),

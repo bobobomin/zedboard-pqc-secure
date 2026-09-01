@@ -15,7 +15,7 @@ module chacha20_block (
     logic [31:0] initial_state [0:15];
     logic [31:0] working_state [0:15];
     logic [31:0] round_state   [0:15];
-    logic [4:0]  round_index;
+    logic [5:0]  step_index;
     integer i_comb;
     integer i_seq;
 
@@ -26,17 +26,27 @@ module chacha20_block (
         rotl32 = (value << amount) | (value >> (32 - amount));
     endfunction
 
-    task automatic quarter_round(
+    /*
+     * Half a quarter round: two of the four dependent additions.  The four
+     * additions of a full quarter round chain through one another, so running
+     * all of them in one clock stacks sixteen 32-bit carry chains per round.
+     * Each step below evaluates one half, selected by second_i.
+     */
+    task automatic quarter_round_half(
+        input  logic       second_i,
         inout logic [31:0] a,
         inout logic [31:0] b,
         inout logic [31:0] c,
         inout logic [31:0] d
     );
         begin
-            a = a + b; d = rotl32(d ^ a, 16);
-            c = c + d; b = rotl32(b ^ c, 12);
-            a = a + b; d = rotl32(d ^ a,  8);
-            c = c + d; b = rotl32(b ^ c,  7);
+            if (!second_i) begin
+                a = a + b; d = rotl32(d ^ a, 16);
+                c = c + d; b = rotl32(b ^ c, 12);
+            end else begin
+                a = a + b; d = rotl32(d ^ a,  8);
+                c = c + d; b = rotl32(b ^ c,  7);
+            end
         end
     endtask
 
@@ -50,24 +60,25 @@ module chacha20_block (
         for (i_comb = 0; i_comb < 16; i_comb = i_comb + 1)
             round_state[i_comb] = working_state[i_comb];
 
-        if (round_index[0] == 1'b0) begin
-            quarter_round(round_state[0], round_state[4],
-                          round_state[8], round_state[12]);
-            quarter_round(round_state[1], round_state[5],
-                          round_state[9], round_state[13]);
-            quarter_round(round_state[2], round_state[6],
-                          round_state[10], round_state[14]);
-            quarter_round(round_state[3], round_state[7],
-                          round_state[11], round_state[15]);
+        /* step_index[1] picks column vs diagonal, step_index[0] picks the half. */
+        if (step_index[1] == 1'b0) begin
+            quarter_round_half(step_index[0], round_state[0], round_state[4],
+                               round_state[8], round_state[12]);
+            quarter_round_half(step_index[0], round_state[1], round_state[5],
+                               round_state[9], round_state[13]);
+            quarter_round_half(step_index[0], round_state[2], round_state[6],
+                               round_state[10], round_state[14]);
+            quarter_round_half(step_index[0], round_state[3], round_state[7],
+                               round_state[11], round_state[15]);
         end else begin
-            quarter_round(round_state[0], round_state[5],
-                          round_state[10], round_state[15]);
-            quarter_round(round_state[1], round_state[6],
-                          round_state[11], round_state[12]);
-            quarter_round(round_state[2], round_state[7],
-                          round_state[8], round_state[13]);
-            quarter_round(round_state[3], round_state[4],
-                          round_state[9], round_state[14]);
+            quarter_round_half(step_index[0], round_state[0], round_state[5],
+                               round_state[10], round_state[15]);
+            quarter_round_half(step_index[0], round_state[1], round_state[6],
+                               round_state[11], round_state[12]);
+            quarter_round_half(step_index[0], round_state[2], round_state[7],
+                               round_state[8], round_state[13]);
+            quarter_round_half(step_index[0], round_state[3], round_state[4],
+                               round_state[9], round_state[14]);
         end
     end
 
@@ -76,7 +87,7 @@ module chacha20_block (
             busy_o      <= 1'b0;
             done_o      <= 1'b0;
             block_o     <= '0;
-            round_index <= '0;
+            step_index  <= '0;
             for (i_seq = 0; i_seq < 16; i_seq = i_seq + 1) begin
                 initial_state[i_seq] <= '0;
                 working_state[i_seq] <= '0;
@@ -106,18 +117,19 @@ module chacha20_block (
                     working_state[13+i_seq] <= nonce_i[32*i_seq +: 32];
                 end
 
-                round_index <= 5'd0;
+                step_index  <= 6'd0;
                 busy_o      <= 1'b1;
             end else if (busy_o) begin
-                if (round_index == 5'd19) begin
+                /* 10 double rounds = 20 half rounds = 40 steps, then the feed-forward add. */
+                if (step_index == 6'd40) begin
                     for (i_seq = 0; i_seq < 16; i_seq = i_seq + 1)
-                        block_o[32*i_seq +: 32] <= round_state[i_seq] + initial_state[i_seq];
+                        block_o[32*i_seq +: 32] <= working_state[i_seq] + initial_state[i_seq];
                     busy_o <= 1'b0;
                     done_o <= 1'b1;
                 end else begin
                     for (i_seq = 0; i_seq < 16; i_seq = i_seq + 1)
                         working_state[i_seq] <= round_state[i_seq];
-                    round_index <= round_index + 5'd1;
+                    step_index <= step_index + 6'd1;
                 end
             end
         end

@@ -22,20 +22,22 @@ module sha3_shake_stream (
     localparam logic [1:0] MODE_SHAKE256 = 2'd3;
 
     typedef enum logic [2:0] {
-        S_IDLE, S_ABSORB, S_PERM_ABSORB, S_PERM_FINAL,
+        S_IDLE, S_ABSORB, S_PAD_FINAL, S_PERM_ABSORB, S_PERM_FINAL,
         S_SQUEEZE, S_PERM_SQUEEZE
     } sponge_state_t;
 
-    sponge_state_t control_state;
+    /* This state selects the data input and the enable of all 1600 sponge
+       flops.  As a single net it reaches every one of them and spends most of
+       its path in routing, so it is replicated. */
+    (* max_fanout = 64 *) sponge_state_t control_state;
     logic [1599:0] sponge_state;
-    logic [1599:0] absorb_next;
-    logic [1599:0] padded_state;
-    logic [1599:0] permutation_input;
+    logic [1599:0] sponge_xored;
     logic [1599:0] permutation_output;
     logic permutation_start, permutation_done;
     logic [7:0] selected_rate_bytes, selected_suffix;
-    logic [7:0] rate_bytes, suffix;
+    logic [7:0] rate_bytes, rate_last, suffix;
     logic [7:0] absorb_position, squeeze_position;
+    logic [7:0] xor_position, xor_byte;
     logic [15:0] output_length, output_count;
 
     always_comb begin
@@ -47,25 +49,34 @@ module sha3_shake_stream (
         endcase
     end
 
+    /*
+     * A single byte-wide XOR into the sponge.  Absorbing a message byte, the
+     * domain suffix and the 0x80 pad all take this one path, so the 1600-bit
+     * update network exists once instead of once per case.
+     */
     always_comb begin
-        absorb_next = sponge_state;
-        absorb_next[8*absorb_position +: 8] =
-            sponge_state[8*absorb_position +: 8] ^ input_byte_i;
-        padded_state = sponge_state;
-        padded_state[8*absorb_position +: 8] =
-            sponge_state[8*absorb_position +: 8] ^ suffix;
-        padded_state[8*(rate_bytes-1) +: 8] =
-            padded_state[8*(rate_bytes-1) +: 8] ^ 8'h80;
+        if (control_state == S_PAD_FINAL) begin
+            xor_position = rate_last;
+            xor_byte     = 8'h80;
+        end else begin
+            xor_position = absorb_position;
+            xor_byte     = input_valid_i ? input_byte_i : suffix;
+        end
+        sponge_xored = sponge_state;
+        sponge_xored[8*xor_position +: 8] =
+            sponge_state[8*xor_position +: 8] ^ xor_byte;
     end
 
-    assign input_ready_o  = (control_state == S_ABSORB);
+    (* max_fanout = 64 *) logic absorb_active;
+    assign absorb_active  = (control_state == S_ABSORB);
+    assign input_ready_o  = absorb_active;
     assign output_valid_o = (control_state == S_SQUEEZE);
     assign output_byte_o  = sponge_state[8*squeeze_position +: 8];
     assign busy_o         = (control_state != S_IDLE);
 
     keccak_f1600 u_permutation (
         .clk_i(clk_i), .rst_ni(rst_ni), .start_i(permutation_start),
-        .state_i(permutation_input), .busy_o(),
+        .state_i(sponge_state), .busy_o(),
         .done_o(permutation_done), .state_o(permutation_output)
     );
 
@@ -73,13 +84,13 @@ module sha3_shake_stream (
         if (!rst_ni) begin
             control_state    <= S_IDLE;
             sponge_state     <= '0;
-            permutation_input<= '0;
             permutation_start<= 1'b0;
             absorb_position  <= '0;
             squeeze_position <= '0;
             output_length    <= '0;
             output_count     <= '0;
             rate_bytes       <= 8'd136;
+            rate_last        <= 8'd135;
             suffix           <= 8'h06;
             done_o           <= 1'b0;
         end else begin
@@ -93,26 +104,32 @@ module sha3_shake_stream (
                     output_count     <= '0;
                     output_length    <= output_length_i;
                     rate_bytes       <= selected_rate_bytes;
+                    rate_last        <= selected_rate_bytes - 8'd1;
                     suffix           <= selected_suffix;
                     control_state    <= S_ABSORB;
                 end
 
                 S_ABSORB: begin
-                    if (input_valid_i && input_ready_o) begin
-                        if (absorb_position == rate_bytes-1) begin
-                            permutation_input <= absorb_next;
+                    if (input_valid_i && absorb_active) begin
+                        sponge_state <= sponge_xored;
+                        if (absorb_position == rate_last) begin
                             permutation_start <= 1'b1;
                             absorb_position   <= 8'd0;
                             control_state     <= S_PERM_ABSORB;
                         end else begin
-                            sponge_state    <= absorb_next;
                             absorb_position <= absorb_position + 8'd1;
                         end
                     end else if (finalize_i) begin
-                        permutation_input <= padded_state;
-                        permutation_start <= 1'b1;
-                        control_state     <= S_PERM_FINAL;
+                        sponge_state  <= sponge_xored;   /* domain suffix */
+                        control_state <= S_PAD_FINAL;
                     end
+                end
+
+                /* Second pad byte goes through the same XOR path one clock later. */
+                S_PAD_FINAL: begin
+                    sponge_state      <= sponge_xored;   /* 0x80 at rate_last */
+                    permutation_start <= 1'b1;
+                    control_state     <= S_PERM_FINAL;
                 end
 
                 S_PERM_ABSORB: if (permutation_done) begin
@@ -136,8 +153,7 @@ module sha3_shake_stream (
                     if (output_count + 16'd1 == output_length) begin
                         done_o        <= 1'b1;
                         control_state <= S_IDLE;
-                    end else if (squeeze_position == rate_bytes-1) begin
-                        permutation_input <= sponge_state;
+                    end else if (squeeze_position == rate_last) begin
                         permutation_start <= 1'b1;
                         squeeze_position  <= 8'd0;
                         output_count      <= output_count + 16'd1;

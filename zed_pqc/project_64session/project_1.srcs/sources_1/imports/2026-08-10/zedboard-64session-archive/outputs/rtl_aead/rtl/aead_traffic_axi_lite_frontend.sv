@@ -38,18 +38,25 @@ module aead_traffic_axi_lite_frontend #(
     logic[511:0]data_q;logic[127:0]tag_q;logic[63:0]rsp_counter_q;
     logic[511:0]rsp_data_q;logic[127:0]rsp_tag_q;
     logic[31:0]input_data[0:15];logic[31:0]input_tag[0:3];
-    logic[31:0]read_mux;integer i;
+    logic[31:0]read_mux;
     function automatic[31:0]merge(input[31:0]oldv,input[31:0]newv,input[3:0]strb);
       integer b;begin merge=oldv;for(b=0;b<4;b=b+1)if(strb[b])merge[8*b+:8]=newv[8*b+:8];end
     endfunction
-    assign s_axi_awready=!aw_hold&&!s_axi_bvalid;
-    assign s_axi_wready=!w_hold&&!s_axi_bvalid;assign s_axi_bresp=0;
-    assign s_axi_arready=!s_axi_rvalid;assign s_axi_rresp=0;
+    /* Reset arrives already synchronised from the top, so it is used as an
+       asynchronous reset here like everywhere else in this clock domain, and it
+       holds the AXI channels closed instead of swallowing a transfer. */
+    assign s_axi_awready=rst_ni&&!aw_hold&&!s_axi_bvalid;
+    assign s_axi_wready=rst_ni&&!w_hold&&!s_axi_bvalid;assign s_axi_bresp=0;
+    assign s_axi_arready=rst_ni&&!s_axi_rvalid;assign s_axi_rresp=0;
+    /* Only the granted slot's payload is ever read by the arbiter, and only
+       slot_q can be granted because req_valid_o carries a single bit.  The wide
+       request buses therefore carry the same value on every slot position:
+       broadcasting keeps slot_q off the 2048-bit path and lets the arbiter's
+       slot mux collapse away. */
     always_comb begin
-      req_valid_o=0;req_decrypt_o=0;req_data_len_o=0;req_counter_o=0;req_data_o=0;req_tag_o=0;
-      if(pending)begin req_valid_o[slot_q]=1;req_decrypt_o[slot_q]=decrypt_q;
-        req_data_len_o[8*slot_q+:8]=length_q;req_counter_o[64*slot_q+:64]=counter_q;
-        req_data_o[512*slot_q+:512]=data_q;req_tag_o[128*slot_q+:128]=tag_q;end
+      req_valid_o=0;if(pending)req_valid_o[slot_q]=1;
+      req_decrypt_o={4{decrypt_q}};req_data_len_o={4{length_q}};
+      req_counter_o={4{counter_q}};req_data_o={4{data_q}};req_tag_o={4{tag_q}};
       rsp_ready_o=0;if(inflight)rsp_ready_o[slot_q]=1;
     end
     always_comb begin
@@ -64,22 +71,23 @@ module aead_traffic_axi_lite_frontend #(
         REG_RSP_COUNTER_HI:read_mux=rsp_counter_q[63:32];
         REG_FAULT:read_mux={23'd0,fault_detected_i,fault_code_i};
         default:begin
-          for(i=0;i<16;i=i+1)begin
-            if(s_axi_araddr[8:0]==REG_INPUT_DATA+4*i)read_mux=input_data[i];
-            if(s_axi_araddr[8:0]==REG_OUTPUT_DATA+4*i)read_mux=rsp_data_q[32*i+:32];end
-          for(i=0;i<4;i=i+1)begin
-            if(s_axi_araddr[8:0]==REG_INPUT_TAG+4*i)read_mux=input_tag[i];
-            if(s_axi_araddr[8:0]==REG_OUTPUT_TAG+4*i)read_mux=rsp_tag_q[32*i+:32];end
+          for(int rd=0;rd<16;rd++)begin
+            if(s_axi_araddr[8:0]==REG_INPUT_DATA+4*rd)read_mux=input_data[rd];
+            if(s_axi_araddr[8:0]==REG_OUTPUT_DATA+4*rd)read_mux=rsp_data_q[32*rd+:32];end
+          for(int rt=0;rt<4;rt++)begin
+            if(s_axi_araddr[8:0]==REG_INPUT_TAG+4*rt)read_mux=input_tag[rt];
+            if(s_axi_araddr[8:0]==REG_OUTPUT_TAG+4*rt)read_mux=rsp_tag_q[32*rt+:32];end
         end
       endcase
     end
-    always_ff @(posedge clk_i)begin
+    always_ff @(posedge clk_i or negedge rst_ni)begin
       if(!rst_ni)begin aw_hold<=0;w_hold<=0;write_commit<=0;s_axi_bvalid<=0;
+        awaddr_q<=0;wdata_q<=0;wstrb_q<=0;
         s_axi_rvalid<=0;s_axi_rdata<=0;slot_reg<=0;length_reg<=0;counter_reg<=0;
         slot_q<=0;length_q<=0;counter_q<=0;decrypt_q<=0;pending<=0;inflight<=0;
         done_q<=0;auth_q<=0;error_q<=0;data_q<=0;tag_q<=0;rsp_counter_q<=0;
-        rsp_data_q<=0;rsp_tag_q<=0;for(i=0;i<16;i=i+1)input_data[i]<=0;
-        for(i=0;i<4;i=i+1)input_tag[i]<=0;
+        rsp_data_q<=0;rsp_tag_q<=0;for(int wd=0;wd<16;wd++)input_data[wd]<=0;
+        for(int wt=0;wt<4;wt++)input_tag[wt]<=0;
       end else begin
         write_commit<=0;
         if(s_axi_awvalid&&s_axi_awready)begin awaddr_q<=s_axi_awaddr;aw_hold<=1;end
@@ -99,8 +107,8 @@ module aead_traffic_axi_lite_frontend #(
               if(wstrb_q[1]&&wdata_q[8])done_q<=0;
               if(wstrb_q[0]&&wdata_q[0]&&!pending&&!inflight)begin
                 slot_q<=slot_reg;length_q<=length_reg;counter_q<=counter_reg;decrypt_q<=wdata_q[1];
-                for(i=0;i<16;i=i+1)data_q[32*i+:32]<=input_data[i];
-                for(i=0;i<4;i=i+1)tag_q[32*i+:32]<=input_tag[i];
+                for(int wd=0;wd<16;wd++)data_q[32*wd+:32]<=input_data[wd];
+                for(int wt=0;wt<4;wt++)tag_q[32*wt+:32]<=input_tag[wt];
                 pending<=1;inflight<=1;done_q<=0;auth_q<=0;error_q<=0;end
             end
             REG_SLOT:slot_reg<=merge({30'd0,slot_reg},wdata_q,wstrb_q);
@@ -108,10 +116,10 @@ module aead_traffic_axi_lite_frontend #(
             REG_COUNTER_LO:counter_reg[31:0]<=merge(counter_reg[31:0],wdata_q,wstrb_q);
             REG_COUNTER_HI:counter_reg[63:32]<=merge(counter_reg[63:32],wdata_q,wstrb_q);
             default:begin
-              for(i=0;i<16;i=i+1)if(awaddr_q[8:0]==REG_INPUT_DATA+4*i)
-                input_data[i]<=merge(input_data[i],wdata_q,wstrb_q);
-              for(i=0;i<4;i=i+1)if(awaddr_q[8:0]==REG_INPUT_TAG+4*i)
-                input_tag[i]<=merge(input_tag[i],wdata_q,wstrb_q);
+              for(int wd=0;wd<16;wd++)if(awaddr_q[8:0]==REG_INPUT_DATA+4*wd)
+                input_data[wd]<=merge(input_data[wd],wdata_q,wstrb_q);
+              for(int wt=0;wt<4;wt++)if(awaddr_q[8:0]==REG_INPUT_TAG+4*wt)
+                input_tag[wt]<=merge(input_tag[wt],wdata_q,wstrb_q);
             end
           endcase
         end

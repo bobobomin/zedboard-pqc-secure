@@ -56,8 +56,8 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
     localparam [7:0] F_OUTPUT     = 8'h40;
 
     typedef enum logic [3:0] {
-        IDLE, D_START, D_WAIT, T_START, T_WAIT, K_START, K_WAIT,
-        C_START, C_WAIT, REPORT
+        IDLE, D_START, D_WAIT, T_GUARD, T_START, T_WAIT, K_GUARD, K_START,
+        K_WAIT, C_GUARD, C_START, C_WAIT, REPORT
     } state_t;
     state_t state, prev_state;
 
@@ -66,6 +66,11 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
     logic [31:0] session;
     logic core_done, core_fail, final_done, final_fail;
     logic [255:0] ss, ss_a, ss_b, transcript_a, transcript_b;
+    /* Redundancy checks on 256- and 576-bit pairs.  Comparing them inside the
+       state that gates the hash start puts the whole compare tree in front of
+       the hash engine's load enable, so the result is registered and each
+       check waits one clock in a *_GUARD state. */
+    logic ss_match, transcript_match, material_match;
     logic [575:0] material_a, material_b, hdigest;
     logic eswe, ecwe, dpwe, hpwe, pwe;
     logic [8:0] dska, hska, ska;
@@ -169,7 +174,7 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
         hslot = dhslot;
 
         if (state == T_START) begin
-            hs_req = !(fault_detected_o || (ss_a != ~ss_b));
+            hs_req = !(fault_detected_o || !ss_match);
             hcmd_req = 5;
             hd0 = 0;
             hd1 = 0;
@@ -179,7 +184,7 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
             heta = 0;
             hslot = 0;
         end else if (state == K_START) begin
-            hs_req = !(fault_detected_o || (transcript_a != ~transcript_b));
+            hs_req = !(fault_detected_o || !transcript_match);
             hcmd_req = 6;
             hd0 = ss_a;
             hd1 = transcript_a;
@@ -194,7 +199,7 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
         hcmd_hash = hcmd_req ^ {2'b00, fault_inject_i[0]};
         hdone_ctl = hdone_raw & ~fault_inject_i[4];
         install_req = (state == C_START) && !fault_detected_o
-                      && (material_a == ~material_b) && (hash_index == 14);
+                      && material_match && (hash_index == 14);
 
         mon_rsp_valid = raw_rsp_valid | fault_inject_i[5];
         rsp_valid_o = mon_rsp_valid & outstanding;
@@ -229,8 +234,14 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
             hash_index       <= 0;
             stage_timer      <= 0;
             outstanding      <= 0;
+            ss_match         <= 0;
+            transcript_match <= 0;
+            material_match   <= 0;
         end else begin
             prev_state <= state;
+            ss_match         <= (ss_a         == ~ss_b);
+            transcript_match <= (transcript_a == ~transcript_b);
+            material_match   <= (material_a   == ~material_b);
             if (state != prev_state)
                 stage_timer <= 0;
             else if ((state != IDLE) && (state != REPORT))
@@ -280,10 +291,11 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
                         fault_detected_o <= 1;
                         fault_code_o <= fault_code_o | F_SEQUENCE;
                     end
-                    state <= core_fail ? REPORT : T_START;
+                    state <= core_fail ? REPORT : T_GUARD;
                 end
+                T_GUARD: state <= T_START;
                 T_START: begin
-                    if (fault_detected_o || (ss_a != ~ss_b)) begin
+                    if (fault_detected_o || !ss_match) begin
                         fault_detected_o <= 1;
                         fault_code_o <= fault_code_o | F_SECRET;
                         state <= REPORT;
@@ -294,10 +306,11 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
                 T_WAIT: if (hdone_ctl) begin
                     transcript_a <= hdigest[255:0] ^ {255'd0, fault_inject_i[2]};
                     transcript_b <= ~hdigest[255:0];
-                    state <= K_START;
+                    state <= K_GUARD;
                 end
+                K_GUARD: state <= K_START;
                 K_START: begin
-                    if (fault_detected_o || (transcript_a != ~transcript_b)) begin
+                    if (fault_detected_o || !transcript_match) begin
                         fault_detected_o <= 1;
                         fault_code_o <= fault_code_o | F_TRANSCRIPT;
                         state <= REPORT;
@@ -308,10 +321,11 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
                 K_WAIT: if (hdone_ctl) begin
                     material_a <= hdigest ^ {575'd0, fault_inject_i[3]};
                     material_b <= ~hdigest;
-                    state <= C_START;
+                    state <= C_GUARD;
                 end
+                C_GUARD: state <= C_START;
                 C_START: begin
-                    if (fault_detected_o || (material_a != ~material_b)
+                    if (fault_detected_o || !material_match
                         || (hash_index != 14)) begin
                         fault_detected_o <= 1;
                         fault_code_o <= fault_code_o | F_MATERIAL;
@@ -328,4 +342,3 @@ module mlkem_secure_channel_fault_protected_indexed_axi_top #(
         end
     end
 endmodule
-

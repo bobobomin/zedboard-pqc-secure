@@ -27,6 +27,25 @@ module tb_mlkem_secure_channel_complete_axi_top;
   task automatic put_tag(input[127:0]v);begin for(i=0;i<4;i=i+1)aw(9'h140+4*i,v[32*i+:32]);end endtask
   task automatic get_data(output[511:0]v);begin for(i=0;i<16;i=i+1)begin ar(9'h180+4*i,w);v[32*i+:32]=w;end end endtask
   task automatic get_tag(output[127:0]v);begin for(i=0;i<4;i=i+1)begin ar(9'h1c0+4*i,w);v[32*i+:32]=w;end end endtask
+
+    task automatic check_mlkem_slot(input logic [5:0] test_slot);
+    logic [31:0] readback;
+    begin
+      // ML-KEM AXI-Liteï¿½ï¿½ REG_SLOT(0x0c)ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½È£ ï¿½ï¿½ï¿½ï¿½
+      mw(8'h0c, {26'd0, test_slot});
+
+      // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í¸ï¿½ ï¿½Ù½ï¿½ ï¿½Ð¾î¼­ ï¿½ï¿½ ï¿½Õ½ï¿½ ï¿½ï¿½ï¿½ï¿½ È®ï¿½ï¿½
+      mr(8'h0c, readback);
+
+      if (readback[5:0] !== test_slot)
+        $fatal(1,
+          "ML-KEM slot truncation: wrote %0d, read %0d",
+          test_slot, readback[5:0]);
+
+      $display("PASS ML-KEM AXI slot %0d", test_slot);
+    end
+  endtask
+
   task automatic wait_packet;begin status=0;while(!status[1])ar(9'h008,status);end endtask
   localparam[511:0]PLAIN=512'h5a6564426f617264204d4c2d4b454d202b2043686143686132302d506f6c79313330352064656d6f000000000000000000000000000000000000000000000000;
   localparam[511:0]ZB_CT=512'hb7b235da3dbbb9ecd92eca9019e9223a368ca0aad5fd167f9c86595d727381cb0ecf98c4fd286c963ffe346c8644bd72386083ca105e9f23cdbc2697877d85fa;
@@ -82,7 +101,7 @@ module tb_mlkem_secure_channel_complete_axi_top;
     end else begin
 
       /*
-       * ML-KEM AXI START°¡ ³»ºÎ launch pulse·Î º¯È¯µÈ ½ÃÁ¡ºÎÅÍ ÃøÁ¤
+       * ML-KEM AXI STARTï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ launch pulseï¿½ï¿½ ï¿½ï¿½È¯ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
        */
       if (dut.core.launch) begin
         prof_total      = 0;
@@ -136,7 +155,7 @@ module tb_mlkem_secure_channel_complete_axi_top;
         endcase
 
         /*
-         * K-PKE decrypt ÂÊ polynomial accelerator
+         * K-PKE decrypt ï¿½ï¿½ polynomial accelerator
          */
         if (dut.core.dec.dec.bridge.core_start) begin
           poly_running = 1;
@@ -145,7 +164,7 @@ module tb_mlkem_secure_channel_complete_axi_top;
         end
 
         /*
-         * K-PKE re-encryption ÂÊ polynomial accelerator
+         * K-PKE re-encryption ï¿½ï¿½ polynomial accelerator
          */
         if (dut.core.dec.enc.bridge.core_start) begin
           poly_running = 1;
@@ -185,7 +204,7 @@ module tb_mlkem_secure_channel_complete_axi_top;
         end
 
         /*
-         * °øÀ¯ SHA3/SHAKE engine
+         * ï¿½ï¿½ï¿½ï¿½ SHA3/SHAKE engine
          */
         if (dut.core.hs_hash) begin
           hash_running = 1;
@@ -208,7 +227,7 @@ module tb_mlkem_secure_channel_complete_axi_top;
         end
 
         /*
-         * ÀüÃ¼ ML-KEM ¿Ï·á
+         * ï¿½ï¿½Ã¼ ML-KEM ï¿½Ï·ï¿½
          */
         if (dut.core.final_done) begin
           $display("");
@@ -236,8 +255,8 @@ module tb_mlkem_secure_channel_complete_axi_top;
       end
     end
   end
-  
-  
+
+
     integer detail_bridge_load;
   integer detail_bridge_core;
   integer detail_bridge_store;
@@ -315,12 +334,12 @@ module tb_mlkem_secure_channel_complete_axi_top;
             (dut.core.dec.enc.bridge.state <= 4'd11))
           detail_bridge_store = detail_bridge_store + 1;
 
-        // Ciphertext¿Í K-PKE secret-key unpack
+        // Ciphertextï¿½ï¿½ K-PKE secret-key unpack
         if (dut.core.dec.dec.unpack.state != 0)
           detail_unpack_ciphertext_sk =
             detail_unpack_ciphertext_sk + 1;
 
-        // Public key ¹× rho/H(pk)/z ÃßÃâ
+        // Public key ï¿½ï¿½ rho/H(pk)/z ï¿½ï¿½ï¿½ï¿½
         if (dut.core.dec.unpack_pk.state != 0)
           detail_unpack_public_key =
             detail_unpack_public_key + 1;
@@ -332,15 +351,15 @@ module tb_mlkem_secure_channel_complete_axi_top;
         if (dut.core.dec.enc.addsub.state != 0)
           detail_addsub = detail_addsub + 1;
 
-        // 32-byte message¸¦ polynomial·Î º¯È¯
+        // 32-byte messageï¿½ï¿½ polynomialï¿½ï¿½ ï¿½ï¿½È¯
         if (dut.core.dec.enc.frommsg.state != 0)
           detail_from_message = detail_from_message + 1;
 
-        // PolynomialÀ» 32-byte message·Î º¹¿ø
+        // Polynomialï¿½ï¿½ 32-byte messageï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
         if (dut.core.dec.dec.tomsg.state != 0)
           detail_to_message = detail_to_message + 1;
 
-        // Àç¾ÏÈ£È­ °á°ú ¾ÐÃà ¹× ciphertext ºñ±³
+        // ï¿½ï¿½ï¿½È£È­ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ciphertext ï¿½ï¿½
         if (dut.core.dec.enc.compare.state != 0)
           detail_pack_compare = detail_pack_compare + 1;
 
@@ -373,7 +392,7 @@ module tb_mlkem_secure_channel_complete_axi_top;
     end
   end
   initial begin maw=0;mar=0;mawv=0;mwv=0;mbr=0;marv=0;mrr=0;mwd=0;mws=15;
-  
+
     aaw=0;aar=0;aawv=0;awv=0;abr=0;aarv=0;arr=0;awd=0;aws=15;fi=0;
     f=$fopen(
   "C:/soc_fpga/zed_pqc/src/zedboard-pqc-secure/outputs/golden_reference/secret_key.bin",
@@ -388,8 +407,15 @@ f=$fopen(
 if(!f)$fatal(1,"ct");
 n=$fread(ctb,f);
 $fclose(f);
-    
+
     repeat(4)@(posedge clk);rst=1;repeat(2)@(posedge clk);
+    check_mlkem_slot(6'd0);
+    check_mlkem_slot(6'd3);
+    check_mlkem_slot(6'd4);   // ï¿½Ù½ï¿½: ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½×¸ï¿½ ï¿½ï¿½ï¿½â¼­ 0ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
+    check_mlkem_slot(6'd15);
+    check_mlkem_slot(6'd16);
+    check_mlkem_slot(6'd31);
+    check_mlkem_slot(6'd63);
     mw(8'h20,0);mw(8'h24,0);for(i=0;i<408;i=i+1)mw(8'h28,{skb[4*i+3],skb[4*i+2],skb[4*i+1],skb[4*i]});
     mw(8'h20,1);mw(8'h24,0);for(i=0;i<192;i=i+1)mw(8'h28,{ctb[4*i+3],ctb[4*i+2],ctb[4*i+1],ctb[4*i]});
     mw(8'h0c,0);mw(8'h10,32'h01020304);mw(8'h04,32'h100);mw(8'h04,1);

@@ -12,34 +12,80 @@ module mlkem_poly_addsub_controller(
      * is hidden behind the following coefficient's RAM reads.
      */
     typedef enum logic[3:0]{IDLE,READ_A,READ_B,ISSUE_WRITE,
-        DRAIN0,DRAIN1,FINAL_WRITE,DONE}st_t;st_t state;
-    integer index;logic[3:0]sa,sb,sd;logic sub;logic signed[15:0]left;
+        DRAIN0,DRAIN1,FINAL_WRITE,DONE}st_t;
+    st_t state;
+
+    logic[7:0]index,write_offset;
+    logic[3:0]sa,sb,sd;
+    logic sub;
+    logic signed[15:0]left;
     logic[15:0]result;
-    mlkem_coeff_addsub u(clk_i,rst_ni,left,$signed(poly_rdata_i),sub,result);
+
+    mlkem_coeff_addsub u(
+        clk_i,rst_ni,left,$signed(poly_rdata_i),sub,result
+    );
+
     always_comb begin
-        busy_o=state!=IDLE;done_o=state==DONE;
-        poly_we_o=(state==ISSUE_WRITE&&index!=0)||state==FINAL_WRITE;
+        busy_o=state!=IDLE;
+        done_o=state==DONE;
+        poly_we_o=(state==ISSUE_WRITE&&index!=8'd0)||state==FINAL_WRITE;
         poly_wdata_o=result;
+
+        write_offset=(index==8'd0)?8'd0:index-8'd1;
+
         case(state)
-            READ_A:poly_addr_o=sa*256+index;
-            READ_B:poly_addr_o=sb*256+index;
-            ISSUE_WRITE:poly_addr_o=sd*256+(index==0?0:index-1);
-            default:poly_addr_o=sd*256+255;
+            READ_A:
+                poly_addr_o={sa,index};
+            READ_B:
+                poly_addr_o={sb,index};
+            ISSUE_WRITE:
+                poly_addr_o={sd,write_offset};
+            default:
+                poly_addr_o={sd,8'hff};
         endcase
     end
+
     always_ff @(posedge clk_i or negedge rst_ni)begin
-        if(!rst_ni)begin state<=IDLE;index<=0;sa<=0;sb<=0;sd<=0;sub<=0;left<=0;end
-        else case(state)
-            IDLE:if(start_i)begin sa<=src_a_slot_i;sb<=src_b_slot_i;sd<=dst_slot_i;
-                sub<=subtract_i;index<=0;state<=READ_A;end
-            READ_A:state<=READ_B;
-            READ_B:begin left<=poly_rdata_i;state<=ISSUE_WRITE;end
-            ISSUE_WRITE:if(index==255)state<=DRAIN0;
-                else begin index<=index+1;state<=READ_A;end
-            DRAIN0:state<=DRAIN1;
-            DRAIN1:state<=FINAL_WRITE;
-            FINAL_WRITE:state<=DONE;
-            DONE:state<=IDLE;default:state<=IDLE;
+        if(!rst_ni)begin
+            state<=IDLE;
+            index<=8'd0;
+            sa<=0;
+            sb<=0;
+            sd<=0;
+            sub<=0;
+            left<=0;
+        end else case(state)
+            IDLE:if(start_i)begin
+                sa<=src_a_slot_i;
+                sb<=src_b_slot_i;
+                sd<=dst_slot_i;
+                sub<=subtract_i;
+                index<=8'd0;
+                state<=READ_A;
+            end
+            READ_A:
+                state<=READ_B;
+            READ_B:begin
+                left<=poly_rdata_i;
+                state<=ISSUE_WRITE;
+            end
+            ISSUE_WRITE:
+                if(index==8'hff)
+                    state<=DRAIN0;
+                else begin
+                    index<=index+8'd1;
+                    state<=READ_A;
+                end
+            DRAIN0:
+                state<=DRAIN1;
+            DRAIN1:
+                state<=FINAL_WRITE;
+            FINAL_WRITE:
+                state<=DONE;
+            DONE:
+                state<=IDLE;
+            default:
+                state<=IDLE;
         endcase
     end
 endmodule
@@ -50,17 +96,29 @@ module mlkem_poly_tomsg_controller(
     input logic[15:0]poly_rdata_i,output logic[255:0]message_o);
     typedef enum logic[2:0]{IDLE,READ,WAIT,DONE}st_t;st_t state;
     integer index;logic[3:0]slot;logic[31:0]p;
-    always_comb begin poly_addr_o=slot*256+index;busy_o=state!=IDLE;done_o=state==DONE;
-        p=poly_rdata_i*32'd1290168+32'h40000000;end
+
+    always_comb begin
+        poly_addr_o=slot*256+index;
+        busy_o=state!=IDLE;
+        done_o=state==DONE;
+        p=poly_rdata_i*32'd1290168+32'h40000000;
+    end
+
     always_ff @(posedge clk_i or negedge rst_ni)begin
-        if(!rst_ni)begin state<=IDLE;index<=0;slot<=0;message_o<=0;end
-        else case(state)
-            IDLE:if(start_i)begin slot<=src_slot_i;index<=0;message_o<=0;state<=READ;end
+        if(!rst_ni)begin
+            state<=IDLE; index<=0; slot<=0; message_o<=0;
+        end else case(state)
+            IDLE:if(start_i)begin
+                slot<=src_slot_i; index<=0; message_o<=0; state<=READ;
+            end
             READ:state<=WAIT;
-            /* poly_rdata_i is valid in WAIT for the synchronous RAM read. */
-            WAIT:begin message_o[index]<=p[31];if(index==255)state<=DONE;
-                else begin index<=index+1;state<=READ;end end
-            DONE:state<=IDLE;default:state<=IDLE;
+            WAIT:begin
+                message_o[index]<=p[31];
+                if(index==255) state<=DONE;
+                else begin index<=index+1; state<=READ; end
+            end
+            DONE:state<=IDLE;
+            default:state<=IDLE;
         endcase
     end
 endmodule
