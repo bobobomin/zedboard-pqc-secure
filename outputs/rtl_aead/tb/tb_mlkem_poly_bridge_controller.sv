@@ -1,11 +1,11 @@
 `timescale 1ns/1ps
 module tb_mlkem_poly_bridge_controller;
-    logic clk=0,rst=0,hv,hwe,hrdy,start,busy,done,pwe;logic[1:0]region=2,cmd;
+    logic clk=0,rst=0,hv,hwe,hrdy,start,busy,rdy,done,pwe;logic[1:0]region=2,cmd;
     logic[11:0]ha,pa;logic[31:0]hw,hr;logic[15:0]pw,pr;logic[3:0]sa,sb,sd;integer i;
     always #5 clk=~clk;
     mlkem_decaps_memory mem(clk,hv,hwe,region,ha,hw,hr,hrdy,
         1'b0,9'd0,32'd0,,1'b0,8'd0,32'd0,,pwe,pa,pw,pr);
-    mlkem_poly_bridge_controller dut(clk,rst,start,cmd,sa,sb,sd,busy,done,pwe,pa,pw,pr);
+    mlkem_poly_bridge_controller dut(clk,rst,start,cmd,sa,sb,sd,busy,rdy,done,pwe,pa,pw,pr);
     task automatic wr(input integer a,input integer d);begin ha=a;hw=d;hv=1;hwe=1;
         @(posedge clk);#1;hv=0;hwe=0;end endtask
     task automatic ck(input integer a,input integer e);begin ha=a;hv=1;hwe=0;

@@ -12,7 +12,7 @@ module mlkem512_kpke_decrypt_engine(
     typedef enum logic[4:0]{IDLE,U_START,U_WAIT,N0_START,N0_WAIT,N1_START,N1_WAIT,
         B0_START,B0_WAIT,B1_START,B1_WAIT,A_START,A_WAIT,I_START,I_WAIT,
         S_START,S_WAIT,M_START,M_WAIT,DONE}st_t;st_t state;
-    logic us,ud,uw,bstart,bd,bwe,astart,ad,awe,mstart,md;
+    logic us,ud,uw,bstart,bd,brdy,bwe,astart,ad,awe,mstart,md;
     logic[11:0]upa,bpa,apa,mpa;logic[15:0]upd,bpd,apd;logic[255:0]msg;
     logic[1:0]bcmd;logic[3:0]bsa,bsb,bsd,asa,asb,asd;logic subtract;
     logic uwe;logic[1:0]forward_count,multiply_count;logic inverse_seen;
@@ -22,7 +22,7 @@ module mlkem512_kpke_decrypt_engine(
         .poly_addr_o(upa),.poly_wdata_o(upd));
     mlkem_poly_bridge_controller bridge(.clk_i(clk_i),.rst_ni(rst_ni),
         .start_i(bstart),.command_i(bcmd),.src_a_slot_i(bsa),.src_b_slot_i(bsb),
-        .dst_slot_i(bsd),.busy_o(),.done_o(bd),.poly_we_o(bwe),.poly_addr_o(bpa),
+        .dst_slot_i(bsd),.busy_o(),.ready_o(brdy),.done_o(bd),.poly_we_o(bwe),.poly_addr_o(bpa),
         .poly_wdata_o(bpd),.poly_rdata_i(poly_rdata_i));
     mlkem_poly_addsub_controller addsub(.clk_i(clk_i),.rst_ni(rst_ni),
         .start_i(astart),.subtract_i(subtract),.src_a_slot_i(asa),.src_b_slot_i(asb),
@@ -64,9 +64,12 @@ module mlkem512_kpke_decrypt_engine(
           case(state)
             IDLE:if(start_i)begin state<=U_START;forward_count<=0;multiply_count<=0;inverse_seen<=0;end
             U_START:state<=U_WAIT;U_WAIT:if(ud)state<=N0_START;
-            N0_START:state<=N0_WAIT;N0_WAIT:if(bd)state<=N1_START;
-            N1_START:state<=N1_WAIT;N1_WAIT:if(bd)state<=B0_START;
-            B0_START:state<=B0_WAIT;B0_WAIT:if(bd)state<=B1_START;
+            /* The bridge overlaps consecutive commands, so the next one is
+               issued as soon as it has room; only the last of the run waits
+               for everything to be stored. */
+            N0_START:state<=N0_WAIT;N0_WAIT:if(brdy)state<=N1_START;
+            N1_START:state<=N1_WAIT;N1_WAIT:if(brdy)state<=B0_START;
+            B0_START:state<=B0_WAIT;B0_WAIT:if(brdy)state<=B1_START;
             B1_START:state<=B1_WAIT;B1_WAIT:if(bd)state<=A_START;
             A_START:state<=A_WAIT;A_WAIT:if(ad)state<=I_START;
             I_START:state<=I_WAIT;I_WAIT:if(bd)state<=S_START;

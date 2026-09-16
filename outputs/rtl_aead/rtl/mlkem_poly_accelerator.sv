@@ -8,12 +8,19 @@
  *
  * The host port is intentionally small so it can be exposed through an
  * AXI-Lite coefficient window during bring-up and changed to DMA later.
+ *
+ * Every bank exists twice.  set_i names the half the arithmetic uses; the host
+ * port always addresses the other one, so the bridge can store the previous
+ * result and load the next operands while a command is running.  The two
+ * halves are separate arrays rather than one array with a wider address,
+ * because the arithmetic needs both ports of its own half.
  */
 module mlkem_poly_accelerator (
     input  logic               clk_i,
     input  logic               rst_ni,
     input  logic               start_i,
     input  logic [1:0]         command_i,
+    input  logic               set_i,
     output logic               busy_o,
     output logic               done_o,
     input  logic               host_we_i,
@@ -36,23 +43,29 @@ module mlkem_poly_accelerator (
      * and splits the same way.  Two 128-word halves, each with a dedicated
      * read port and a dedicated write port, therefore serve the two reads and
      * two writes a pipelined butterfly needs without ever colliding. */
-    (* ram_style="block" *) logic signed [15:0] bank_a0[0:127];
-    (* ram_style="block" *) logic signed [15:0] bank_a1[0:127];
-    (* ram_style="block" *) logic signed [15:0] bank_b[0:255];
-    (* ram_style="block" *) logic signed [15:0] bank_r[0:255];
+    (* ram_style="block" *) logic signed [15:0] bank_a0s0[0:127],bank_a0s1[0:127];
+    (* ram_style="block" *) logic signed [15:0] bank_a1s0[0:127],bank_a1s1[0:127];
+    (* ram_style="block" *) logic signed [15:0] bank_bs0[0:255],bank_bs1[0:255];
+    (* ram_style="block" *) logic signed [15:0] bank_rs0[0:255],bank_rs1[0:255];
     logic signed [15:0] zetas[0:127];
     integer layer, span, block_start, butterfly, zeta_index;
     logic [2:0] drain;
-    logic a_we0,a_we1,b_we0,b_we1,r_we0,r_we1;
-    /* Reads and writes now happen in the same cycle, so the request pair each
-     * one presents to the parity shim is its own. */
+    /* Arithmetic-side request channel.  Reads and writes happen in the same
+     * cycle, so each presents its own pair to the parity shim. */
+    logic a_we0,a_we1,r_we0,r_we1;
     logic [7:0] a_raddr0,a_raddr1,a_waddr0,a_waddr1;
     logic [7:0] b_addr0,b_addr1,r_addr0,r_addr1;
-    logic signed [15:0] a_wdin0,a_wdin1,b_din0,b_din1,r_din0,r_din1;
-    logic signed [15:0] a_dout0,a_dout1,b_dout0,b_dout1,r_dout0,r_dout1;
+    logic signed [15:0] a_wdin0,a_wdin1,r_din0,r_din1;
+    logic signed [15:0] a_dout0,a_dout1,b_dout0,b_dout1;
     logic a_rsel,a_rsel_q,a_wsel,a_w0_we,a_w1_we;
     logic [6:0] a_r0_addr,a_r1_addr,a_w0_addr,a_w1_addr;
     logic signed [15:0] a_w0_din,a_w1_din,a_r0_dout,a_r1_dout;
+    /* Host-side request channel, one access per cycle into the other half. */
+    logic ha_we,hb_we,hr_we,ha_sel,ha_sel_q,ha_w0_we,ha_w1_we,set_q;
+    logic [6:0] ha_idx;
+    logic signed [15:0] a0s0_dout,a0s1_dout,a1s0_dout,a1s1_dout;
+    logic signed [15:0] bs0_dout0,bs0_dout1,bs1_dout0,bs1_dout1;
+    logic signed [15:0] rs0_dout0,rs1_dout0;
     logic signed [15:0] bm_a0_reg,bm_a1_reg,bm_b0_reg,bm_b1_reg;
     /* Break every Montgomery product across clock boundaries so the BaseMul
      * BRAM-to-BRAM path holds one multiply per stage, as NTT/INTT already do.
@@ -148,10 +161,12 @@ module mlkem_poly_accelerator (
         zetas[124]=958; zetas[125]=-1460; zetas[126]=1522; zetas[127]=1628;
     end
 
-    /* Parity routing for bank_a.  a_addr0/a_addr1 keep their meaning as a
-     * two-port request pair; the parity of a_addr0 decides which half serves
-     * which, and the same selector delayed by the read latency puts the two
-     * words back on a_dout0/a_dout1. */
+    /* Parity routing for the arithmetic channel.  a_raddr0/a_raddr1 and
+     * a_waddr0/a_waddr1 are request pairs; the parity of the first address
+     * decides which half serves which, and the read selector delayed by the
+     * read latency puts the two words back on a_dout0/a_dout1.  The host makes
+     * one access per cycle, so it presents the same index to both halves and
+     * only enables the write on the matching parity. */
     always_comb begin
         a_rsel=^a_raddr0;
         a_r0_addr=a_rsel?a_raddr1[7:1]:a_raddr0[7:1];
@@ -163,46 +178,86 @@ module mlkem_poly_accelerator (
         a_w1_din=a_wsel?a_wdin0:a_wdin1;
         a_w0_we=a_wsel?a_we1:a_we0;
         a_w1_we=a_wsel?a_we0:a_we1;
+        ha_sel=^host_addr_i;ha_idx=host_addr_i[7:1];
+        ha_w0_we=ha_we&&!ha_sel;ha_w1_we=ha_we&&ha_sel;
+        a_r0_dout=set_q?a0s1_dout:a0s0_dout;
+        a_r1_dout=set_q?a1s1_dout:a1s0_dout;
         a_dout0=a_rsel_q?a_r1_dout:a_r0_dout;
         a_dout1=a_rsel_q?a_r0_dout:a_r1_dout;
+        b_dout0=set_q?bs1_dout0:bs0_dout0;
+        b_dout1=set_q?bs1_dout1:bs0_dout1;
     end
-    /* One read port and one write port per half infers simple dual-port RAM. */
+    /* One read port and one write port per array infers simple dual-port RAM.
+     * set_i picks which channel owns which half; the host always gets the one
+     * the arithmetic is not using. */
     always_ff @(posedge clk_i) begin
-        a_rsel_q<=a_rsel;
-        a_r0_dout<=bank_a0[a_r0_addr];
-        if(a_w0_we)bank_a0[a_w0_addr]<=a_w0_din;
-    end
-    always_ff @(posedge clk_i) begin
-        a_r1_dout<=bank_a1[a_r1_addr];
-        if(a_w1_we)bank_a1[a_w1_addr]<=a_w1_din;
-    end
-    /* Two explicit synchronous ports per remaining bank infer block RAM. */
-    always_ff @(posedge clk_i) begin
-        if(b_we0)bank_b[b_addr0]<=b_din0;
-        b_dout0<=bank_b[b_addr0];
+        a_rsel_q<=a_rsel;ha_sel_q<=ha_sel;set_q<=set_i;
     end
     always_ff @(posedge clk_i) begin
-        if(b_we1)bank_b[b_addr1]<=b_din1;
-        b_dout1<=bank_b[b_addr1];
+        a0s0_dout<=bank_a0s0[set_i?ha_idx:a_r0_addr];
+        if(set_i?ha_w0_we:a_w0_we)
+            bank_a0s0[set_i?ha_idx:a_w0_addr]<=set_i?host_wdata_i:a_w0_din;
     end
     always_ff @(posedge clk_i) begin
-        if(r_we0)bank_r[r_addr0]<=r_din0;
-        r_dout0<=bank_r[r_addr0];
+        a0s1_dout<=bank_a0s1[set_i?a_r0_addr:ha_idx];
+        if(set_i?a_w0_we:ha_w0_we)
+            bank_a0s1[set_i?a_w0_addr:ha_idx]<=set_i?a_w0_din:host_wdata_i;
     end
     always_ff @(posedge clk_i) begin
-        if(r_we1)bank_r[r_addr1]<=r_din1;
-        r_dout1<=bank_r[r_addr1];
+        a1s0_dout<=bank_a1s0[set_i?ha_idx:a_r1_addr];
+        if(set_i?ha_w1_we:a_w1_we)
+            bank_a1s0[set_i?ha_idx:a_w1_addr]<=set_i?host_wdata_i:a_w1_din;
+    end
+    always_ff @(posedge clk_i) begin
+        a1s1_dout<=bank_a1s1[set_i?a_r1_addr:ha_idx];
+        if(set_i?a_w1_we:ha_w1_we)
+            bank_a1s1[set_i?a_w1_addr:ha_idx]<=set_i?a_w1_din:host_wdata_i;
+    end
+    /* BaseMul reads bank_b on both ports and never writes it, so the host
+     * shares port 0 of the half it owns. */
+    always_ff @(posedge clk_i) begin
+        bs0_dout0<=bank_bs0[set_i?host_addr_i:b_addr0];
+        if(set_i&&hb_we)bank_bs0[host_addr_i]<=host_wdata_i;
+    end
+    always_ff @(posedge clk_i) begin
+        bs0_dout1<=bank_bs0[b_addr1];
+    end
+    always_ff @(posedge clk_i) begin
+        bs1_dout0<=bank_bs1[set_i?b_addr0:host_addr_i];
+        if(!set_i&&hb_we)bank_bs1[host_addr_i]<=host_wdata_i;
+    end
+    always_ff @(posedge clk_i) begin
+        bs1_dout1<=bank_bs1[b_addr1];
+    end
+    /* BaseMul writes bank_r on both ports and never reads it, so the host
+     * shares port 0 of the half it owns. */
+    always_ff @(posedge clk_i) begin
+        rs0_dout0<=bank_rs0[set_i?host_addr_i:r_addr0];
+        if(set_i?hr_we:r_we0)
+            bank_rs0[set_i?host_addr_i:r_addr0]<=set_i?host_wdata_i:r_din0;
+    end
+    always_ff @(posedge clk_i) begin
+        if(!set_i&&r_we1)bank_rs0[r_addr1]<=r_din1;
+    end
+    always_ff @(posedge clk_i) begin
+        rs1_dout0<=bank_rs1[set_i?r_addr0:host_addr_i];
+        if(set_i?r_we0:hr_we)
+            bank_rs1[set_i?r_addr0:host_addr_i]<=set_i?r_din0:host_wdata_i;
+    end
+    always_ff @(posedge clk_i) begin
+        if(set_i&&r_we1)bank_rs1[r_addr1]<=r_din1;
     end
 
     always_comb begin
-        a_we0=0;a_we1=0;b_we0=0;b_we1=0;r_we0=0;r_we1=0;
-        a_raddr0=host_addr_i;a_raddr1=0;a_waddr0=host_addr_i;a_waddr1=0;
-        b_addr0=host_addr_i;b_addr1=0;r_addr0=host_addr_i;r_addr1=0;
-        a_wdin0=host_wdata_i;a_wdin1=0;b_din0=host_wdata_i;b_din1=0;
-        r_din0=host_wdata_i;r_din1=0;
-        if(state==IDLE&&host_we_i)case(host_bank_i)
-            0:a_we0=1;1:b_we0=1;default:r_we0=1;
-        endcase
+        a_we0=0;a_we1=0;r_we0=0;r_we1=0;
+        a_raddr0=0;a_raddr1=0;a_waddr0=0;a_waddr1=0;
+        b_addr0=0;b_addr1=0;r_addr0=0;r_addr1=0;
+        a_wdin0=0;a_wdin1=0;r_din0=0;r_din1=0;
+        /* The host half is never the half under computation, so host writes no
+         * longer have to wait for the core to be idle. */
+        ha_we=host_we_i&&host_bank_i==2'd0;
+        hb_we=host_we_i&&host_bank_i==2'd1;
+        hr_we=host_we_i&&host_bank_i>=2'd2;
         case(state)
             NTT_RUN,INTT_RUN:begin
                 a_raddr0=butterfly;a_raddr1=butterfly+span;
@@ -240,8 +295,10 @@ module mlkem_poly_accelerator (
             r_din1=basemul_p01_d3+basemul_p10_d3;
         end
         case(host_bank_i)
-            0:host_rdata_o=a_dout0;1:host_rdata_o=b_dout0;
-            default:host_rdata_o=r_dout0;
+            0:host_rdata_o=ha_sel_q?(set_q?a1s0_dout:a1s1_dout)
+                                   :(set_q?a0s0_dout:a0s1_dout);
+            1:host_rdata_o=set_q?bs0_dout0:bs1_dout0;
+            default:host_rdata_o=set_q?rs0_dout0:rs1_dout0;
         endcase
     end
 
