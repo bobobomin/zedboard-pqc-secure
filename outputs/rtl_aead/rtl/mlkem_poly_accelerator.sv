@@ -31,17 +31,14 @@ module mlkem_poly_accelerator (
                               INTT_SCALE_WRITE,
                               INTT_READ, INTT_PREP, INTT_MUL,
                               INTT_MONT, INTT_REDUCE, INTT_WRITE,
-                              BASEMUL_READ, BASEMUL_LATCH, BASEMUL_MUL,
-                              BASEMUL_MONT, BASEMUL_REDUCE,
-                              BASEMUL_ZMUL, BASEMUL_ZMONT,
-                              BASEMUL_ZREDUCE, BASEMUL_WRITE} state_t;
+                              BASEMUL_RUN, BASEMUL_DRAIN} state_t;
     state_t state;
 
     (* ram_style="block" *) logic signed [15:0] bank_a[0:255];
     (* ram_style="block" *) logic signed [15:0] bank_b[0:255];
     (* ram_style="block" *) logic signed [15:0] bank_r[0:255];
     logic signed [15:0] zetas[0:127];
-    integer layer, span, block_start, butterfly, zeta_index, pair_index;
+    integer layer, span, block_start, butterfly, zeta_index;
     logic a_we0,a_we1,b_we0,b_we1,r_we0,r_we1;
     logic [7:0] a_addr0,a_addr1,b_addr0,b_addr1,r_addr0,r_addr1;
     logic signed [15:0] a_din0,a_din1,b_din0,b_din1,r_din0,r_din1;
@@ -49,19 +46,38 @@ module mlkem_poly_accelerator (
     logic signed [15:0] bm_a0_reg,bm_a1_reg,bm_b0_reg,bm_b1_reg;
     /* Break every Montgomery product across clock boundaries so the BaseMul
      * BRAM-to-BRAM path holds one multiply per stage, as NTT/INTT already do.
-     * The four coefficient products share the MUL/MONT/REDUCE stages; the
-     * trailing zeta multiply reuses the p11 product and multiplier registers
-     * because they are free once BASEMUL_REDUCE has latched its result. */
+     * The eight stages run as a pipeline: one coefficient pair is issued and
+     * one retires per clock, so no register may be reused by a later stage of
+     * the same pair.  Values produced early and consumed late get their own
+     * delay chains instead. */
     logic signed [31:0] basemul_prod11_reg, basemul_prod00_reg;
     logic signed [31:0] basemul_prod01_reg, basemul_prod10_reg;
+    /* The reduction needs the raw product one stage after the multiplier
+     * register is formed, and by then the product registers hold the next
+     * pair. */
+    logic signed [31:0] basemul_prod11_d1, basemul_prod00_d1;
+    logic signed [31:0] basemul_prod01_d1, basemul_prod10_d1;
     logic signed [15:0] basemul_mult11_reg, basemul_mult00_reg;
     logic signed [15:0] basemul_mult01_reg, basemul_mult10_reg;
     logic signed [15:0] basemul_p11_reg, basemul_p00_reg;
     logic signed [15:0] basemul_p01_reg, basemul_p10_reg;
+    /* p00/p01/p10 are reduced three stages before the zeta path finishes. */
+    logic signed [15:0] basemul_p00_d1, basemul_p00_d2, basemul_p00_d3;
+    logic signed [15:0] basemul_p01_d1, basemul_p01_d2, basemul_p01_d3;
+    logic signed [15:0] basemul_p10_d1, basemul_p10_d2, basemul_p10_d3;
+    /* The zeta multiply keeps its own product/multiplier registers; the p11
+     * pair is occupied by the following coefficient pairs. */
+    logic signed [31:0] basemul_zprod_reg, basemul_zprod_d1;
+    logic signed [15:0] basemul_zmult_reg;
     logic signed [15:0] basemul_p11z_reg;
-    /* The zeta ROM read and its conditional negation are registered a stage
-     * early so BASEMUL_ZMUL drives the multiplier from registers only. */
-    logic signed [15:0] basemul_zeta_reg;
+    /* The zeta ROM read and its conditional negation are registered at the
+     * multiply stage so the zeta multiply drives the multiplier from registers
+     * only, then delayed to meet its pair three stages later. */
+    logic signed [15:0] basemul_zeta_reg, basemul_zeta_d1, basemul_zeta_d2;
+    /* Pair index and valid bit follow the data through all eight stages: the
+     * write of pair i lands eight cycles after its read address is issued. */
+    logic [6:0] bm_ptr, bm_idx_d[1:8];
+    logic bm_vld_d[1:8];
 
     /* NTT/INTT arithmetic pipeline.  One Montgomery reduction contains three
      * dependent multiplies (coefficient product and the two reduction
@@ -166,17 +182,19 @@ module mlkem_poly_accelerator (
                 a_din0=barrett_result_reg;
                 a_din1=fq_result_reg;
             end
-            BASEMUL_READ:begin
-                a_addr0=2*pair_index;a_addr1=2*pair_index+1;
-                b_addr0=2*pair_index;b_addr1=2*pair_index+1;
-            end
-            BASEMUL_WRITE:begin
-                r_addr0=2*pair_index;r_addr1=2*pair_index+1;r_we0=1;r_we1=1;
-                r_din0=basemul_p11z_reg+basemul_p00_reg;
-                r_din1=basemul_p01_reg+basemul_p10_reg;
+            BASEMUL_RUN:begin
+                a_addr0=2*bm_ptr;a_addr1=2*bm_ptr+1;
+                b_addr0=2*bm_ptr;b_addr1=2*bm_ptr+1;
             end
             default:begin end
         endcase
+        /* Results retire while later pairs are still being read, so the result
+         * port is driven from the delayed valid bit and not from a state. */
+        if(bm_vld_d[8])begin
+            r_addr0=2*bm_idx_d[8];r_addr1=2*bm_idx_d[8]+1;r_we0=1;r_we1=1;
+            r_din0=basemul_p11z_reg+basemul_p00_d3;
+            r_din1=basemul_p01_d3+basemul_p10_d3;
+        end
         case(host_bank_i)
             0:host_rdata_o=a_dout0;1:host_rdata_o=b_dout0;
             default:host_rdata_o=r_dout0;
@@ -186,14 +204,23 @@ module mlkem_poly_accelerator (
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             state<=IDLE; busy_o<=0; done_o<=0; layer<=0; span<=0;
-            block_start<=0; butterfly<=0; zeta_index<=0; pair_index<=0;
+            block_start<=0; butterfly<=0; zeta_index<=0; bm_ptr<=0;
             basemul_prod11_reg<=0;basemul_prod00_reg<=0;
             basemul_prod01_reg<=0;basemul_prod10_reg<=0;
+            basemul_prod11_d1<=0;basemul_prod00_d1<=0;
+            basemul_prod01_d1<=0;basemul_prod10_d1<=0;
             basemul_mult11_reg<=0;basemul_mult00_reg<=0;
             basemul_mult01_reg<=0;basemul_mult10_reg<=0;
             basemul_p11_reg<=0;basemul_p00_reg<=0;
-            basemul_p01_reg<=0;basemul_p10_reg<=0;basemul_p11z_reg<=0;
-            basemul_zeta_reg<=0;
+            basemul_p01_reg<=0;basemul_p10_reg<=0;
+            basemul_p00_d1<=0;basemul_p00_d2<=0;basemul_p00_d3<=0;
+            basemul_p01_d1<=0;basemul_p01_d2<=0;basemul_p01_d3<=0;
+            basemul_p10_d1<=0;basemul_p10_d2<=0;basemul_p10_d3<=0;
+            basemul_zprod_reg<=0;basemul_zprod_d1<=0;basemul_zmult_reg<=0;
+            basemul_p11z_reg<=0;
+            basemul_zeta_reg<=0;basemul_zeta_d1<=0;basemul_zeta_d2<=0;
+            bm_a0_reg<=0;bm_a1_reg<=0;bm_b0_reg<=0;bm_b1_reg<=0;
+            for(int k=1;k<=8;k++)begin bm_idx_d[k]<=0;bm_vld_d[k]<=0;end
             butterfly_a_reg<=0;intt_sum_reg<=0;intt_diff_reg<=0;
             fq_product_reg<=0;mont_multiplier_reg<=0;fq_result_reg<=0;
             barrett_accum_reg<=0;barrett_temp_reg<=0;barrett_result_reg<=0;
@@ -206,7 +233,7 @@ module mlkem_poly_accelerator (
                         CMD_NTT: begin layer<=1; span<=128; block_start<=0;
                             butterfly<=0; zeta_index<=1; state<=NTT_READ; end
                         CMD_INTT: begin butterfly<=0; state<=INTT_SCALE_READ; end
-                        default: begin pair_index<=0; state<=BASEMUL_READ; end
+                        default: begin bm_ptr<=0; state<=BASEMUL_RUN; end
                     endcase
                 end
 
@@ -293,58 +320,59 @@ module mlkem_poly_accelerator (
                     end else begin butterfly<=butterfly+1;state<=INTT_READ;end
                 end
 
-                BASEMUL_READ:state<=BASEMUL_LATCH;
-                /* Coefficient RAM output goes straight into the multipliers
-                   otherwise, putting block RAM read delay and DSP entry in the
-                   same clock. */
-                BASEMUL_LATCH:begin
+                /* Every stage advances on every clock in both states; the
+                   coefficient RAM output still gets its own latch stage so the
+                   block RAM read delay and the DSP entry never share a clock.
+                   BASEMUL_RUN issues one read per cycle for 128 pairs,
+                   BASEMUL_DRAIN lets the eight in-flight pairs retire. */
+                BASEMUL_RUN,BASEMUL_DRAIN:begin
                     bm_a0_reg<=a_dout0;bm_a1_reg<=a_dout1;
                     bm_b0_reg<=b_dout0;bm_b1_reg<=b_dout1;
-                    state<=BASEMUL_MUL;
-                end
-                BASEMUL_MUL:begin
                     basemul_prod11_reg<=bm_a1_reg*bm_b1_reg;
                     basemul_prod00_reg<=bm_a0_reg*bm_b0_reg;
                     basemul_prod01_reg<=bm_a0_reg*bm_b1_reg;
                     basemul_prod10_reg<=bm_a1_reg*bm_b0_reg;
-                    basemul_zeta_reg<=pair_index[0]
-                        ? -zetas[64+(pair_index>>1)]:zetas[64+(pair_index>>1)];
-                    state<=BASEMUL_MONT;
-                end
-                BASEMUL_MONT:begin
+                    basemul_zeta_reg<=bm_idx_d[2][0]
+                        ? -zetas[64+(bm_idx_d[2]>>1)]:zetas[64+(bm_idx_d[2]>>1)];
                     basemul_mult11_reg<=basemul_prod11_reg[15:0]*16'd62209;
                     basemul_mult00_reg<=basemul_prod00_reg[15:0]*16'd62209;
                     basemul_mult01_reg<=basemul_prod01_reg[15:0]*16'd62209;
                     basemul_mult10_reg<=basemul_prod10_reg[15:0]*16'd62209;
-                    state<=BASEMUL_REDUCE;
-                end
-                BASEMUL_REDUCE:begin
-                    basemul_p11_reg<=(basemul_prod11_reg-
+                    basemul_prod11_d1<=basemul_prod11_reg;
+                    basemul_prod00_d1<=basemul_prod00_reg;
+                    basemul_prod01_d1<=basemul_prod01_reg;
+                    basemul_prod10_d1<=basemul_prod10_reg;
+                    basemul_zeta_d1<=basemul_zeta_reg;
+                    basemul_p11_reg<=(basemul_prod11_d1-
                         basemul_mult11_reg*32'sd3329)>>>16;
-                    basemul_p00_reg<=(basemul_prod00_reg-
+                    basemul_p00_reg<=(basemul_prod00_d1-
                         basemul_mult00_reg*32'sd3329)>>>16;
-                    basemul_p01_reg<=(basemul_prod01_reg-
+                    basemul_p01_reg<=(basemul_prod01_d1-
                         basemul_mult01_reg*32'sd3329)>>>16;
-                    basemul_p10_reg<=(basemul_prod10_reg-
+                    basemul_p10_reg<=(basemul_prod10_d1-
                         basemul_mult10_reg*32'sd3329)>>>16;
-                    state<=BASEMUL_ZMUL;
-                end
-                BASEMUL_ZMUL:begin
-                    basemul_prod11_reg<=basemul_p11_reg*basemul_zeta_reg;
-                    state<=BASEMUL_ZMONT;
-                end
-                BASEMUL_ZMONT:begin
-                    basemul_mult11_reg<=basemul_prod11_reg[15:0]*16'd62209;
-                    state<=BASEMUL_ZREDUCE;
-                end
-                BASEMUL_ZREDUCE:begin
-                    basemul_p11z_reg<=(basemul_prod11_reg-
-                        basemul_mult11_reg*32'sd3329)>>>16;
-                    state<=BASEMUL_WRITE;
-                end
-                BASEMUL_WRITE: begin
-                    if (pair_index==127) begin state<=IDLE; busy_o<=0; done_o<=1; end
-                    else begin pair_index<=pair_index+1;state<=BASEMUL_READ;end
+                    basemul_zeta_d2<=basemul_zeta_d1;
+                    basemul_zprod_reg<=basemul_p11_reg*basemul_zeta_d2;
+                    basemul_p00_d1<=basemul_p00_reg;basemul_p00_d2<=basemul_p00_d1;
+                    basemul_p00_d3<=basemul_p00_d2;
+                    basemul_p01_d1<=basemul_p01_reg;basemul_p01_d2<=basemul_p01_d1;
+                    basemul_p01_d3<=basemul_p01_d2;
+                    basemul_p10_d1<=basemul_p10_reg;basemul_p10_d2<=basemul_p10_d1;
+                    basemul_p10_d3<=basemul_p10_d2;
+                    basemul_zmult_reg<=basemul_zprod_reg[15:0]*16'd62209;
+                    basemul_zprod_d1<=basemul_zprod_reg;
+                    basemul_p11z_reg<=(basemul_zprod_d1-
+                        basemul_zmult_reg*32'sd3329)>>>16;
+                    bm_idx_d[1]<=bm_ptr;bm_vld_d[1]<=(state==BASEMUL_RUN);
+                    for(int k=2;k<=8;k++)begin
+                        bm_idx_d[k]<=bm_idx_d[k-1];bm_vld_d[k]<=bm_vld_d[k-1];
+                    end
+                    if(state==BASEMUL_RUN)begin
+                        if(bm_ptr==127)state<=BASEMUL_DRAIN;
+                        else bm_ptr<=bm_ptr+1;
+                    end else if(bm_vld_d[8]&&bm_idx_d[8]==7'd127) begin
+                        state<=IDLE; busy_o<=0; done_o<=1;
+                    end
                 end
                 default: state<=IDLE;
             endcase
