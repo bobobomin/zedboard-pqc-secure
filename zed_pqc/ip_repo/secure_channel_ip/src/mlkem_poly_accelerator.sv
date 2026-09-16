@@ -34,7 +34,14 @@ module mlkem_poly_accelerator (
                               BASEMUL_RUN, BASEMUL_DRAIN} state_t;
     state_t state;
 
-    (* ram_style="block" *) logic signed [15:0] bank_a[0:255];
+    /* bank_a is split by address bit-parity.  Inside one NTT/INTT layer the
+     * paired addresses i and i+span differ in exactly one bit, so their
+     * parities are always opposite; BaseMul's 2i/2i+1 pair differs in bit 0
+     * and splits the same way.  Two 128-word halves, each with a dedicated
+     * read port and a dedicated write port, therefore serve the two reads and
+     * two writes a pipelined butterfly needs without ever colliding. */
+    (* ram_style="block" *) logic signed [15:0] bank_a0[0:127];
+    (* ram_style="block" *) logic signed [15:0] bank_a1[0:127];
     (* ram_style="block" *) logic signed [15:0] bank_b[0:255];
     (* ram_style="block" *) logic signed [15:0] bank_r[0:255];
     logic signed [15:0] zetas[0:127];
@@ -43,6 +50,9 @@ module mlkem_poly_accelerator (
     logic [7:0] a_addr0,a_addr1,b_addr0,b_addr1,r_addr0,r_addr1;
     logic signed [15:0] a_din0,a_din1,b_din0,b_din1,r_din0,r_din1;
     logic signed [15:0] a_dout0,a_dout1,b_dout0,b_dout1,r_dout0,r_dout1;
+    logic a_sel,a_sel_q,a_w0_we,a_w1_we;
+    logic [6:0] a_r0_addr,a_r1_addr,a_w0_addr,a_w1_addr;
+    logic signed [15:0] a_w0_din,a_w1_din,a_r0_dout,a_r1_dout;
     logic signed [15:0] bm_a0_reg,bm_a1_reg,bm_b0_reg,bm_b1_reg;
     /* Break every Montgomery product across clock boundaries so the BaseMul
      * BRAM-to-BRAM path holds one multiply per stage, as NTT/INTT already do.
@@ -130,15 +140,34 @@ module mlkem_poly_accelerator (
         zetas[124]=958; zetas[125]=-1460; zetas[126]=1522; zetas[127]=1628;
     end
 
-    /* Two explicit synchronous ports per coefficient bank infer block RAM. */
+    /* Parity routing for bank_a.  a_addr0/a_addr1 keep their meaning as a
+     * two-port request pair; the parity of a_addr0 decides which half serves
+     * which, and the same selector delayed by the read latency puts the two
+     * words back on a_dout0/a_dout1. */
+    always_comb begin
+        a_sel=^a_addr0;
+        a_r0_addr=a_sel?a_addr1[7:1]:a_addr0[7:1];
+        a_r1_addr=a_sel?a_addr0[7:1]:a_addr1[7:1];
+        a_w0_addr=a_sel?a_addr1[7:1]:a_addr0[7:1];
+        a_w1_addr=a_sel?a_addr0[7:1]:a_addr1[7:1];
+        a_w0_din=a_sel?a_din1:a_din0;
+        a_w1_din=a_sel?a_din0:a_din1;
+        a_w0_we=a_sel?a_we1:a_we0;
+        a_w1_we=a_sel?a_we0:a_we1;
+        a_dout0=a_sel_q?a_r1_dout:a_r0_dout;
+        a_dout1=a_sel_q?a_r0_dout:a_r1_dout;
+    end
+    /* One read port and one write port per half infers simple dual-port RAM. */
     always_ff @(posedge clk_i) begin
-        if(a_we0)bank_a[a_addr0]<=a_din0;
-        a_dout0<=bank_a[a_addr0];
+        a_sel_q<=a_sel;
+        a_r0_dout<=bank_a0[a_r0_addr];
+        if(a_w0_we)bank_a0[a_w0_addr]<=a_w0_din;
     end
     always_ff @(posedge clk_i) begin
-        if(a_we1)bank_a[a_addr1]<=a_din1;
-        a_dout1<=bank_a[a_addr1];
+        a_r1_dout<=bank_a1[a_r1_addr];
+        if(a_w1_we)bank_a1[a_w1_addr]<=a_w1_din;
     end
+    /* Two explicit synchronous ports per remaining bank infer block RAM. */
     always_ff @(posedge clk_i) begin
         if(b_we0)bank_b[b_addr0]<=b_din0;
         b_dout0<=bank_b[b_addr0];
