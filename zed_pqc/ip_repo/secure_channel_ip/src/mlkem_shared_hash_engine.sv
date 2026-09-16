@@ -24,14 +24,17 @@ module mlkem_shared_hash_engine(
     logic[10:0]in_index,input_len,fetch_index;logic[6:0]out_index;logic[1:0]byte_count;
     logic[7:0]coeff_count;logic[2:0]write_index;
     logic[31:0]group,fetch_word,word_cur,word_nxt;
-    logic cur_val,nxt_val,fetch_wait,fetch_en,word_shift,ivalid;
+    logic cur_val,nxt_val,fetch_wait,fetch_en,word_shift,avail,load,take;
+    /* Registered byte in front of the sponge.  Driving its 1600-bit XOR update
+       straight from the byte-select mux was the 100 MHz critical path. */
+    logic feed_valid;logic[7:0]feed_byte;
     logic[7:0]inbyte,obyte;logic hs,hfin,iready,oval,hdone,oready;
     logic[1:0]mode;logic[15:0]out_len;logic[11:0]rv0,rv1;logic rok0,rok1,hash_finished;
     logic signed[127:0]e2;logic signed[63:0]e3;
     mlkem_rejection_pair reject(group[23:0],rv0,rok0,rv1,rok1);
     mlkem_cbd_eta2_group cbd2(group,e2);mlkem_cbd_eta3_group cbd3(group[23:0],e3);
     sha3_shake_stream hash(.clk_i(clk_i),.rst_ni(rst_ni),.start_i(hs),.mode_i(mode),
-        .output_length_i(out_len),.input_byte_i(inbyte),.input_valid_i(ivalid),
+        .output_length_i(out_len),.input_byte_i(feed_byte),.input_valid_i(feed_valid),
         .input_ready_o(iready),.finalize_i(hfin),.output_byte_o(obyte),
         .output_valid_o(oval),.output_ready_i(oready),.busy_o(),.done_o(hdone));
     function automatic logic memory_input(input logic[2:0]c,input logic[10:0]n);
@@ -72,8 +75,13 @@ module mlkem_shared_hash_engine(
                 else if(in_index<43)inbyte=d0[8*(in_index-11)+:8];
                 else inbyte=d1[8*(in_index-43)+:8];end
         endcase
-        ivalid=state==FEED&&in_index<input_len&&(!memory_input(cmd,in_index)||cur_val);
-        word_shift=ivalid&&iready&&memory_input(cmd,in_index)&&in_index[1:0]==2'd3;
+        /* in_index names the byte being selected into feed_byte.  The register
+           refills in the same cycle the sponge takes it, so the feed still runs
+           at one byte per cycle. */
+        avail=in_index<input_len&&(!memory_input(cmd,in_index)||cur_val);
+        load=state==FEED&&(!feed_valid||iready);
+        take=load&&avail;
+        word_shift=take&&memory_input(cmd,in_index)&&in_index[1:0]==2'd3;
         /* fetch_wait covers the one dead cycle after fetch_index moves: the
            memories are registered, so sk/ct_rdata_i still hold the previous word. */
         fetch_en=state==FEED&&!fetch_wait&&memory_input(cmd,fetch_index)&&
@@ -91,7 +99,7 @@ module mlkem_shared_hash_engine(
             eta<=0;slot<=0;in_index<=0;input_len<=0;out_index<=0;byte_count<=0;
             coeff_count<=0;write_index<=0;group<=0;digest_o<=0;error_o<=0;
             fetch_index<=0;word_cur<=0;word_nxt<=0;cur_val<=0;nxt_val<=0;fetch_wait<=0;
-            hash_finished<=0;end
+            feed_valid<=0;feed_byte<=0;hash_finished<=0;end
         else begin
           if(hdone)hash_finished<=1;
           case(state)
@@ -102,7 +110,7 @@ module mlkem_shared_hash_engine(
               /* Addresses are live throughout HSTART, so the first word is already
                  on sk/ct_rdata_i when FEED starts. */
               fetch_index<=command_i==C_J?11'd32:11'd0;
-              cur_val<=0;nxt_val<=0;fetch_wait<=0;
+              cur_val<=0;nxt_val<=0;fetch_wait<=0;feed_valid<=0;
               case(command_i)C_HPK:input_len<=11'd800;C_G:input_len<=11'd64;C_J:input_len<=11'd800;
                 C_MATRIX:input_len<=11'd34;C_NOISE:input_len<=11'd33;C_TRANSCRIPT:input_len<=11'd1572;
                 default:input_len<=11'd75;endcase state<=HSTART;end
@@ -113,8 +121,9 @@ module mlkem_shared_hash_engine(
               if(fetch_en)begin
                   if(!cur_val||(word_shift&&!nxt_val))begin word_cur<=fetch_word;cur_val<=1;end
                   else begin word_nxt<=fetch_word;nxt_val<=1;end end
-              if(in_index==input_len)state<=FINAL;
-              else if(ivalid&&iready)in_index<=in_index+11'd1;
+              if(take)begin feed_byte<=inbyte;feed_valid<=1;in_index<=in_index+11'd1;end
+              else if(load)feed_valid<=0;
+              if(in_index==input_len&&!feed_valid)state<=FINAL;
           end
           FINAL:begin out_index<=0;byte_count<=0;group<=0;state<=OUT;end
           OUT:if(oval)begin
