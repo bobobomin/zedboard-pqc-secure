@@ -25,9 +25,7 @@ module mlkem_poly_accelerator (
     localparam logic [1:0] CMD_NTT=2'd0, CMD_INTT=2'd1, CMD_BASEMUL=2'd2;
     typedef enum logic [4:0] {IDLE,
                               NTT_RUN, NTT_DRAIN,
-                              INTT_SCALE_READ, INTT_SCALE_MUL,
-                              INTT_SCALE_MONT, INTT_SCALE_REDUCE,
-                              INTT_SCALE_WRITE,
+                              INTT_SCALE_RUN, INTT_SCALE_DRAIN,
                               INTT_RUN, INTT_DRAIN,
                               BASEMUL_RUN, BASEMUL_DRAIN} state_t;
     state_t state;
@@ -209,9 +207,7 @@ module mlkem_poly_accelerator (
             NTT_RUN,INTT_RUN:begin
                 a_raddr0=butterfly;a_raddr1=butterfly+span;
             end
-            INTT_SCALE_READ:a_raddr0=butterfly;
-            INTT_SCALE_WRITE:begin a_waddr0=butterfly;a_we0=1;
-                a_wdin0=fq_result_reg;end
+            INTT_SCALE_RUN:a_raddr0=butterfly;
             BASEMUL_RUN:begin
                 a_raddr0=2*bm_ptr;a_raddr1=2*bm_ptr+1;
                 b_addr0=2*bm_ptr;b_addr1=2*bm_ptr+1;
@@ -222,6 +218,10 @@ module mlkem_poly_accelerator (
          * coefficient write ports are driven from the delayed index and valid
          * bit instead of from a write state.  span is only advanced after the
          * layer has drained, so it is still the retiring butterfly's span. */
+        if(vld_d[4]&&(state==INTT_SCALE_RUN||state==INTT_SCALE_DRAIN))begin
+            a_waddr0=bf_d[4];a_we0=1;
+            a_wdin0=fq_result_reg;
+        end
         if(vld_d[4]&&(state==NTT_RUN||state==NTT_DRAIN))begin
             a_waddr0=bf_d[4];a_waddr1=bf_d[4]+span;a_we0=1;a_we1=1;
             a_wdin0=butterfly_a_d2+fq_result_reg;
@@ -281,7 +281,7 @@ module mlkem_poly_accelerator (
                     case (command_i)
                         CMD_NTT: begin layer<=1; span<=128; block_start<=0;
                             butterfly<=0; zeta_index<=1; state<=NTT_RUN; end
-                        CMD_INTT: begin butterfly<=0; state<=INTT_SCALE_READ; end
+                        CMD_INTT: begin butterfly<=0; state<=INTT_SCALE_RUN; end
                         default: begin bm_ptr<=0; state<=BASEMUL_RUN; end
                     endcase
                 end
@@ -325,24 +325,34 @@ module mlkem_poly_accelerator (
                     end else drain<=drain-3'd1;
                 end
 
-                INTT_SCALE_READ:state<=INTT_SCALE_MUL;
-                INTT_SCALE_MUL: begin
+                /* The n^-1 scale pass is the same four register stages as a
+                   forward butterfly with the zeta multiply replaced by the
+                   constant 1441, so it reuses the butterfly pipeline's
+                   registers and index chain.  Read j and write j-4 are always
+                   different addresses, and the drain lets the last writes land
+                   before the butterfly stage reads them back. */
+                INTT_SCALE_RUN,INTT_SCALE_DRAIN: begin
                     fq_product_reg<=a_dout0*16'sd1441;
-                    state<=INTT_SCALE_MONT;
-                end
-                INTT_SCALE_MONT: begin
                     mont_multiplier_reg<=fq_product_reg[15:0]*16'd62209;
-                    state<=INTT_SCALE_REDUCE;
-                end
-                INTT_SCALE_REDUCE: begin
-                    fq_result_reg<=(fq_product_reg-
+                    fq_product_d1<=fq_product_reg;
+                    fq_result_reg<=(fq_product_d1-
                         mont_multiplier_reg*32'sd3329)>>>16;
-                    state<=INTT_SCALE_WRITE;
-                end
-                INTT_SCALE_WRITE: begin
-                    if (butterfly==255) begin layer<=7; span<=2; block_start<=0;
-                        butterfly<=0; zeta_index<=127; state<=INTT_RUN; end
-                    else begin butterfly<=butterfly+1;state<=INTT_SCALE_READ;end
+                    bf_d[1]<=butterfly;vld_d[1]<=(state==INTT_SCALE_RUN);
+                    for(int k=2;k<=4;k++)begin
+                        bf_d[k]<=bf_d[k-1];vld_d[k]<=vld_d[k-1];
+                    end
+                    if (state==INTT_SCALE_RUN) begin
+                        if (butterfly==255) begin drain<=3; state<=INTT_SCALE_DRAIN; end
+                        else butterfly<=butterfly+1;
+                    end else if (drain==0) begin
+                        layer<=7; span<=2; block_start<=0;
+                        butterfly<=0; zeta_index<=127;
+                        /* The scale pass leaves its trailing bubbles in the
+                           chain; clear them so no stale valid reaches the
+                           butterfly stage's write port. */
+                        for(int k=1;k<=5;k++)vld_d[k]<=0;
+                        state<=INTT_RUN;
+                    end else drain<=drain-3'd1;
                 end
 
                 /* Same transformation as NTT, one stage deeper because the
