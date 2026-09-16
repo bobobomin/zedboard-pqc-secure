@@ -24,13 +24,11 @@ module mlkem_poly_accelerator (
 );
     localparam logic [1:0] CMD_NTT=2'd0, CMD_INTT=2'd1, CMD_BASEMUL=2'd2;
     typedef enum logic [4:0] {IDLE,
-                              NTT_READ, NTT_MUL, NTT_MONT,
-                              NTT_REDUCE, NTT_WRITE,
+                              NTT_RUN, NTT_DRAIN,
                               INTT_SCALE_READ, INTT_SCALE_MUL,
                               INTT_SCALE_MONT, INTT_SCALE_REDUCE,
                               INTT_SCALE_WRITE,
-                              INTT_READ, INTT_PREP, INTT_MUL,
-                              INTT_MONT, INTT_REDUCE, INTT_WRITE,
+                              INTT_RUN, INTT_DRAIN,
                               BASEMUL_RUN, BASEMUL_DRAIN} state_t;
     state_t state;
 
@@ -46,11 +44,15 @@ module mlkem_poly_accelerator (
     (* ram_style="block" *) logic signed [15:0] bank_r[0:255];
     logic signed [15:0] zetas[0:127];
     integer layer, span, block_start, butterfly, zeta_index;
+    logic [2:0] drain;
     logic a_we0,a_we1,b_we0,b_we1,r_we0,r_we1;
-    logic [7:0] a_addr0,a_addr1,b_addr0,b_addr1,r_addr0,r_addr1;
-    logic signed [15:0] a_din0,a_din1,b_din0,b_din1,r_din0,r_din1;
+    /* Reads and writes now happen in the same cycle, so the request pair each
+     * one presents to the parity shim is its own. */
+    logic [7:0] a_raddr0,a_raddr1,a_waddr0,a_waddr1;
+    logic [7:0] b_addr0,b_addr1,r_addr0,r_addr1;
+    logic signed [15:0] a_wdin0,a_wdin1,b_din0,b_din1,r_din0,r_din1;
     logic signed [15:0] a_dout0,a_dout1,b_dout0,b_dout1,r_dout0,r_dout1;
-    logic a_sel,a_sel_q,a_w0_we,a_w1_we;
+    logic a_rsel,a_rsel_q,a_wsel,a_w0_we,a_w1_we;
     logic [6:0] a_r0_addr,a_r1_addr,a_w0_addr,a_w1_addr;
     logic signed [15:0] a_w0_din,a_w1_din,a_r0_dout,a_r1_dout;
     logic signed [15:0] bm_a0_reg,bm_a1_reg,bm_b0_reg,bm_b1_reg;
@@ -93,13 +95,21 @@ module mlkem_poly_accelerator (
      * dependent multiplies (coefficient product and the two reduction
      * multiplies).  Keep one multiply per clock stage so the BRAM-to-BRAM
      * butterfly path can meet the ZedBoard clock constraint. */
-    logic signed [15:0] butterfly_a_reg;
-    logic signed [15:0] intt_sum_reg, intt_diff_reg;
-    logic signed [31:0] fq_product_reg;
+    logic signed [15:0] butterfly_a_reg, butterfly_a_d1, butterfly_a_d2;
+    logic signed [15:0] intt_sum_reg, intt_diff_reg, intt_sum_d1, intt_sum_d2;
+    logic signed [31:0] fq_product_reg, fq_product_d1;
     logic signed [15:0] mont_multiplier_reg;
     logic signed [15:0] fq_result_reg;
     logic signed [31:0] barrett_accum_reg, barrett_temp_reg;
     logic signed [15:0] barrett_result_reg;
+    /* The zeta ROM is read at the issue stage, one cycle ahead of the NTT
+     * multiply and two ahead of the INTT one, which also takes the ROM lookup
+     * out of the multiplier path.  Index and valid follow the data so the
+     * write of butterfly i lands four (NTT) or five (INTT) cycles after its
+     * read address is issued. */
+    logic signed [15:0] zeta_d1, zeta_d2;
+    logic [7:0] bf_d[1:5];
+    logic vld_d[1:5];
 
     /* The scalar helpers that chained three multiplies in one expression were
      * removed with the BaseMul split; every multiply now sits in its own FSM
@@ -145,21 +155,22 @@ module mlkem_poly_accelerator (
      * which, and the same selector delayed by the read latency puts the two
      * words back on a_dout0/a_dout1. */
     always_comb begin
-        a_sel=^a_addr0;
-        a_r0_addr=a_sel?a_addr1[7:1]:a_addr0[7:1];
-        a_r1_addr=a_sel?a_addr0[7:1]:a_addr1[7:1];
-        a_w0_addr=a_sel?a_addr1[7:1]:a_addr0[7:1];
-        a_w1_addr=a_sel?a_addr0[7:1]:a_addr1[7:1];
-        a_w0_din=a_sel?a_din1:a_din0;
-        a_w1_din=a_sel?a_din0:a_din1;
-        a_w0_we=a_sel?a_we1:a_we0;
-        a_w1_we=a_sel?a_we0:a_we1;
-        a_dout0=a_sel_q?a_r1_dout:a_r0_dout;
-        a_dout1=a_sel_q?a_r0_dout:a_r1_dout;
+        a_rsel=^a_raddr0;
+        a_r0_addr=a_rsel?a_raddr1[7:1]:a_raddr0[7:1];
+        a_r1_addr=a_rsel?a_raddr0[7:1]:a_raddr1[7:1];
+        a_wsel=^a_waddr0;
+        a_w0_addr=a_wsel?a_waddr1[7:1]:a_waddr0[7:1];
+        a_w1_addr=a_wsel?a_waddr0[7:1]:a_waddr1[7:1];
+        a_w0_din=a_wsel?a_wdin1:a_wdin0;
+        a_w1_din=a_wsel?a_wdin0:a_wdin1;
+        a_w0_we=a_wsel?a_we1:a_we0;
+        a_w1_we=a_wsel?a_we0:a_we1;
+        a_dout0=a_rsel_q?a_r1_dout:a_r0_dout;
+        a_dout1=a_rsel_q?a_r0_dout:a_r1_dout;
     end
     /* One read port and one write port per half infers simple dual-port RAM. */
     always_ff @(posedge clk_i) begin
-        a_sel_q<=a_sel;
+        a_rsel_q<=a_rsel;
         a_r0_dout<=bank_a0[a_r0_addr];
         if(a_w0_we)bank_a0[a_w0_addr]<=a_w0_din;
     end
@@ -187,36 +198,40 @@ module mlkem_poly_accelerator (
 
     always_comb begin
         a_we0=0;a_we1=0;b_we0=0;b_we1=0;r_we0=0;r_we1=0;
-        a_addr0=host_addr_i;a_addr1=0;b_addr0=host_addr_i;b_addr1=0;
-        r_addr0=host_addr_i;r_addr1=0;
-        a_din0=host_wdata_i;a_din1=0;b_din0=host_wdata_i;b_din1=0;
+        a_raddr0=host_addr_i;a_raddr1=0;a_waddr0=host_addr_i;a_waddr1=0;
+        b_addr0=host_addr_i;b_addr1=0;r_addr0=host_addr_i;r_addr1=0;
+        a_wdin0=host_wdata_i;a_wdin1=0;b_din0=host_wdata_i;b_din1=0;
         r_din0=host_wdata_i;r_din1=0;
         if(state==IDLE&&host_we_i)case(host_bank_i)
             0:a_we0=1;1:b_we0=1;default:r_we0=1;
         endcase
         case(state)
-            NTT_READ,INTT_READ:begin
-                a_addr0=butterfly;a_addr1=butterfly+span;
+            NTT_RUN,INTT_RUN:begin
+                a_raddr0=butterfly;a_raddr1=butterfly+span;
             end
-            NTT_WRITE:begin
-                a_addr0=butterfly;a_addr1=butterfly+span;a_we0=1;a_we1=1;
-                a_din0=butterfly_a_reg+fq_result_reg;
-                a_din1=butterfly_a_reg-fq_result_reg;
-            end
-            INTT_SCALE_READ:a_addr0=butterfly;
-            INTT_SCALE_WRITE:begin a_addr0=butterfly;a_we0=1;
-                a_din0=fq_result_reg;end
-            INTT_WRITE:begin
-                a_addr0=butterfly;a_addr1=butterfly+span;a_we0=1;a_we1=1;
-                a_din0=barrett_result_reg;
-                a_din1=fq_result_reg;
-            end
+            INTT_SCALE_READ:a_raddr0=butterfly;
+            INTT_SCALE_WRITE:begin a_waddr0=butterfly;a_we0=1;
+                a_wdin0=fq_result_reg;end
             BASEMUL_RUN:begin
-                a_addr0=2*bm_ptr;a_addr1=2*bm_ptr+1;
+                a_raddr0=2*bm_ptr;a_raddr1=2*bm_ptr+1;
                 b_addr0=2*bm_ptr;b_addr1=2*bm_ptr+1;
             end
             default:begin end
         endcase
+        /* Butterflies retire while later ones are still being read, so the
+         * coefficient write ports are driven from the delayed index and valid
+         * bit instead of from a write state.  span is only advanced after the
+         * layer has drained, so it is still the retiring butterfly's span. */
+        if(vld_d[4]&&(state==NTT_RUN||state==NTT_DRAIN))begin
+            a_waddr0=bf_d[4];a_waddr1=bf_d[4]+span;a_we0=1;a_we1=1;
+            a_wdin0=butterfly_a_d2+fq_result_reg;
+            a_wdin1=butterfly_a_d2-fq_result_reg;
+        end
+        if(vld_d[5]&&(state==INTT_RUN||state==INTT_DRAIN))begin
+            a_waddr0=bf_d[5];a_waddr1=bf_d[5]+span;a_we0=1;a_we1=1;
+            a_wdin0=barrett_result_reg;
+            a_wdin1=fq_result_reg;
+        end
         /* Results retire while later pairs are still being read, so the result
          * port is driven from the delayed valid bit and not from a state. */
         if(bm_vld_d[8])begin
@@ -234,6 +249,10 @@ module mlkem_poly_accelerator (
         if (!rst_ni) begin
             state<=IDLE; busy_o<=0; done_o<=0; layer<=0; span<=0;
             block_start<=0; butterfly<=0; zeta_index<=0; bm_ptr<=0;
+            drain<=0; zeta_d1<=0; zeta_d2<=0;
+            butterfly_a_d1<=0; butterfly_a_d2<=0; fq_product_d1<=0;
+            intt_sum_d1<=0; intt_sum_d2<=0;
+            for(int k=1;k<=5;k++)begin bf_d[k]<=0;vld_d[k]<=0;end
             basemul_prod11_reg<=0;basemul_prod00_reg<=0;
             basemul_prod01_reg<=0;basemul_prod10_reg<=0;
             basemul_prod11_d1<=0;basemul_prod00_d1<=0;
@@ -258,41 +277,52 @@ module mlkem_poly_accelerator (
             case (state)
                 IDLE: if (start_i) begin
                     busy_o<=1;
+                    for(int k=1;k<=5;k++)vld_d[k]<=0;
                     case (command_i)
                         CMD_NTT: begin layer<=1; span<=128; block_start<=0;
-                            butterfly<=0; zeta_index<=1; state<=NTT_READ; end
+                            butterfly<=0; zeta_index<=1; state<=NTT_RUN; end
                         CMD_INTT: begin butterfly<=0; state<=INTT_SCALE_READ; end
                         default: begin bm_ptr<=0; state<=BASEMUL_RUN; end
                     endcase
                 end
 
-                NTT_READ:state<=NTT_MUL;
-                NTT_MUL: begin
+                /* One butterfly issued per clock.  The four register stages
+                   are the old READ/MUL/MONT/REDUCE boundaries, unchanged, so
+                   per-stage logic depth is the same; only the sequencing
+                   changes.  Addresses inside a layer never repeat, so the
+                   reads of butterfly i+4 cannot collide with the writes of
+                   butterfly i.  Layers are separated by NTT_DRAIN, which
+                   stops issuing for the pipeline depth so the last writes
+                   land before the next layer reads them. */
+                NTT_RUN,NTT_DRAIN: begin
                     butterfly_a_reg<=a_dout0;
-                    fq_product_reg<=a_dout1*zetas[zeta_index];
-                    state<=NTT_MONT;
-                end
-                NTT_MONT: begin
+                    fq_product_reg<=a_dout1*zeta_d1;
                     mont_multiplier_reg<=fq_product_reg[15:0]*16'd62209;
-                    state<=NTT_REDUCE;
-                end
-                NTT_REDUCE: begin
-                    fq_result_reg<=(fq_product_reg-
+                    fq_product_d1<=fq_product_reg;
+                    butterfly_a_d1<=butterfly_a_reg;
+                    fq_result_reg<=(fq_product_d1-
                         mont_multiplier_reg*32'sd3329)>>>16;
-                    state<=NTT_WRITE;
-                end
-                NTT_WRITE: begin
-                    if (butterfly == block_start+span-1) begin
-                        if (block_start+2*span >= 256) begin
-                            if (layer == 7) begin state<=IDLE; busy_o<=0; done_o<=1; end
-                            else begin layer<=layer+1; span<=span>>1; block_start<=0;
-                                butterfly<=0; zeta_index<=zeta_index+1;state<=NTT_READ; end
-                        end else begin
-                            block_start<=block_start+2*span;
-                            butterfly<=block_start+2*span;
-                            zeta_index<=zeta_index+1;state<=NTT_READ;
-                        end
-                    end else begin butterfly<=butterfly+1;state<=NTT_READ;end
+                    butterfly_a_d2<=butterfly_a_d1;
+                    zeta_d1<=zetas[zeta_index];
+                    bf_d[1]<=butterfly;vld_d[1]<=(state==NTT_RUN);
+                    for(int k=2;k<=4;k++)begin
+                        bf_d[k]<=bf_d[k-1];vld_d[k]<=vld_d[k-1];
+                    end
+                    if (state==NTT_RUN) begin
+                        if (butterfly == block_start+span-1) begin
+                            if (block_start+2*span >= 256) begin
+                                drain<=3; state<=NTT_DRAIN;
+                            end else begin
+                                block_start<=block_start+2*span;
+                                butterfly<=block_start+2*span;
+                                zeta_index<=zeta_index+1;
+                            end
+                        end else butterfly<=butterfly+1;
+                    end else if (drain==0) begin
+                        if (layer == 7) begin state<=IDLE; busy_o<=0; done_o<=1; end
+                        else begin layer<=layer+1; span<=span>>1; block_start<=0;
+                            butterfly<=0; zeta_index<=zeta_index+1;state<=NTT_RUN; end
+                    end else drain<=drain-3'd1;
                 end
 
                 INTT_SCALE_READ:state<=INTT_SCALE_MUL;
@@ -311,42 +341,46 @@ module mlkem_poly_accelerator (
                 end
                 INTT_SCALE_WRITE: begin
                     if (butterfly==255) begin layer<=7; span<=2; block_start<=0;
-                        butterfly<=0; zeta_index<=127; state<=INTT_READ; end
+                        butterfly<=0; zeta_index<=127; state<=INTT_RUN; end
                     else begin butterfly<=butterfly+1;state<=INTT_SCALE_READ;end
                 end
 
-                INTT_READ:state<=INTT_PREP;
-                INTT_PREP: begin
+                /* Same transformation as NTT, one stage deeper because the
+                   inverse butterfly adds the sum/difference stage ahead of the
+                   multiply.  The Barrett branch carries its own sum copies so
+                   the reduction still meets its coefficient at the write. */
+                INTT_RUN,INTT_DRAIN: begin
                     intt_sum_reg<=a_dout0+a_dout1;
                     intt_diff_reg<=a_dout1-a_dout0;
-                    state<=INTT_MUL;
-                end
-                INTT_MUL: begin
-                    fq_product_reg<=intt_diff_reg*zetas[zeta_index];
+                    fq_product_reg<=intt_diff_reg*zeta_d2;
                     barrett_accum_reg<=32'sd20159*intt_sum_reg+32'sd33554432;
-                    state<=INTT_MONT;
-                end
-                INTT_MONT: begin
+                    intt_sum_d1<=intt_sum_reg;
                     mont_multiplier_reg<=fq_product_reg[15:0]*16'd62209;
                     barrett_temp_reg<=barrett_accum_reg>>>26;
-                    state<=INTT_REDUCE;
-                end
-                INTT_REDUCE: begin
-                    fq_result_reg<=(fq_product_reg-
+                    fq_product_d1<=fq_product_reg;
+                    intt_sum_d2<=intt_sum_d1;
+                    fq_result_reg<=(fq_product_d1-
                         mont_multiplier_reg*32'sd3329)>>>16;
-                    barrett_result_reg<=intt_sum_reg-
+                    barrett_result_reg<=intt_sum_d2-
                         barrett_temp_reg*32'sd3329;
-                    state<=INTT_WRITE;
-                end
-                INTT_WRITE: begin
-                    if (butterfly == block_start+span-1) begin
-                        if (block_start+2*span >= 256) begin
-                            if (layer==1) begin state<=IDLE; busy_o<=0; done_o<=1; end
-                            else begin layer<=layer-1; span<=span<<1; block_start<=0;
-                                butterfly<=0; zeta_index<=(1<<(layer-1))-1;state<=INTT_READ; end
-                        end else begin block_start<=block_start+2*span;
-                            butterfly<=block_start+2*span; zeta_index<=zeta_index-1;state<=INTT_READ; end
-                    end else begin butterfly<=butterfly+1;state<=INTT_READ;end
+                    zeta_d1<=zetas[zeta_index];zeta_d2<=zeta_d1;
+                    bf_d[1]<=butterfly;vld_d[1]<=(state==INTT_RUN);
+                    for(int k=2;k<=5;k++)begin
+                        bf_d[k]<=bf_d[k-1];vld_d[k]<=vld_d[k-1];
+                    end
+                    if (state==INTT_RUN) begin
+                        if (butterfly == block_start+span-1) begin
+                            if (block_start+2*span >= 256) begin
+                                drain<=4; state<=INTT_DRAIN;
+                            end else begin block_start<=block_start+2*span;
+                                butterfly<=block_start+2*span;
+                                zeta_index<=zeta_index-1; end
+                        end else butterfly<=butterfly+1;
+                    end else if (drain==0) begin
+                        if (layer==1) begin state<=IDLE; busy_o<=0; done_o<=1; end
+                        else begin layer<=layer-1; span<=span<<1; block_start<=0;
+                            butterfly<=0; zeta_index<=(1<<(layer-1))-1;state<=INTT_RUN; end
+                    end else drain<=drain-3'd1;
                 end
 
                 /* Every stage advances on every clock in both states; the
