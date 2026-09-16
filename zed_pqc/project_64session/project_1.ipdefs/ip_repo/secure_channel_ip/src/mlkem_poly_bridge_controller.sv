@@ -54,9 +54,11 @@ module mlkem_poly_bridge_controller(
         else poly_addr_o=0;
         busy_o=(state!=IDLE)||pend;
         /* Room for one more command while nothing is queued and nothing is
-           already loaded, and only once a command is actually in the kernel to
-           overlap with -- otherwise the trailing flush could be overtaken. */
-        ready_o=!pend&&!ld&&(state==IDLE||run);
+           already loaded, and only while the command in the kernel is still
+           running.  Once it has finished with nothing loaded the controller is
+           committed to the trailing flush, and a command accepted then would be
+           overtaken by done_o. */
+        ready_o=!pend&&!ld&&(state==IDLE||(run&&!core_fin&&!core_done&&state!=FLIP));
         done_o=(state==DONE);
     end
     always_ff @(posedge clk_i or negedge rst_ni)begin
@@ -117,4 +119,8 @@ module mlkem_poly_bridge_controller(
             endcase
         end
     end
+    // synthesis translate_off
+    always @(posedge clk_i) if(rst_ni&&start_i&&!ready_o)
+        $error("mlkem_poly_bridge_controller: start_i dropped while not ready");
+    // synthesis translate_on
 endmodule
