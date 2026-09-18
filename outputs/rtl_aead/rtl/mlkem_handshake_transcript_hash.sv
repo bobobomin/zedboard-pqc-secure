@@ -10,7 +10,7 @@ module mlkem_handshake_transcript_hash(
     st_t state;integer index,out_index;logic hs,hfin,iready,oval,hdone;
     logic[7:0]inbyte,obyte,selected;
     sha3_shake_stream h(clk_i,rst_ni,hs,2'd0,16'd32,inbyte,state==FEED,iready,
-        hfin,obyte,oval,1'b1,,hdone);
+        hfin,obyte,oval,1'b1,,hdone,1'b0);
     always_comb begin
         sk_addr_o=(768+index)>>2;ct_addr_o=(index-800)>>2;
         selected=0;

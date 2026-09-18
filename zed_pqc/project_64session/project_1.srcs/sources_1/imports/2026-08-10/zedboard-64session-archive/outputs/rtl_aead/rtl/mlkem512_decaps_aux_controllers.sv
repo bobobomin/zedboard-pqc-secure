@@ -136,7 +136,7 @@ module mlkem512_public_key_hash(
     sha3_shake_stream h(.clk_i(clk_i),.rst_ni(rst_ni),.start_i(hs),.mode_i(2'd0),
         .output_length_i(16'd32),.input_byte_i(inbyte),.input_valid_i(state==FEED),
         .input_ready_o(iready),.finalize_i(hfin),.output_byte_o(obyte),
-        .output_valid_o(oval),.output_ready_i(1'b1),.busy_o(),.done_o(hdone));
+        .output_valid_o(oval),.output_ready_i(1'b1),.busy_o(),.done_o(hdone),.abort_i(1'b0));
     always_comb begin
         sk_addr_o=byte_index>>2;
         case(byte_index[1:0])0:selected=sk_rdata_i[7:0];1:selected=sk_rdata_i[15:8];
@@ -169,7 +169,7 @@ module mlkem512_rejection_hash(
     sha3_shake_stream h(.clk_i(clk_i),.rst_ni(rst_ni),.start_i(hs),.mode_i(2'd3),
         .output_length_i(16'd32),.input_byte_i(inbyte),.input_valid_i(state==FEED),
         .input_ready_o(iready),.finalize_i(hfin),.output_byte_o(obyte),
-        .output_valid_o(oval),.output_ready_i(1'b1),.busy_o(),.done_o(hdone));
+        .output_valid_o(oval),.output_ready_i(1'b1),.busy_o(),.done_o(hdone),.abort_i(1'b0));
     always_comb begin ct_addr_o=(index-32)>>2;
         case((index-32)&3)0:ctbyte=ct_rdata_i[7:0];1:ctbyte=ct_rdata_i[15:8];
             2:ctbyte=ct_rdata_i[23:16];default:ctbyte=ct_rdata_i[31:24];endcase

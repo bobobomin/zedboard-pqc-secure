@@ -36,7 +36,7 @@ module mlkem_shared_hash_engine(
     sha3_shake_stream hash(.clk_i(clk_i),.rst_ni(rst_ni),.start_i(hs),.mode_i(mode),
         .output_length_i(out_len),.input_byte_i(feed_byte),.input_valid_i(feed_valid),
         .input_ready_o(iready),.finalize_i(hfin),.output_byte_o(obyte),
-        .output_valid_o(oval),.output_ready_i(oready),.busy_o(),.done_o(hdone));
+        .output_valid_o(oval),.output_ready_i(oready),.busy_o(),.done_o(hdone),.abort_i(state == DRAIN));
     function automatic logic memory_input(input logic[2:0]c,input logic[10:0]n);
         begin memory_input=(c==C_HPK)||((c==C_J)&&(n>=32))||
             ((c==C_TRANSCRIPT)&&(n<1568));end endfunction

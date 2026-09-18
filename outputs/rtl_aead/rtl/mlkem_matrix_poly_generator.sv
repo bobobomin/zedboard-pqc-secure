@@ -11,7 +11,7 @@ module mlkem_matrix_poly_generator(input logic clk_i,input logic rst_ni,input lo
     sha3_shake_stream hash(.clk_i(clk_i),.rst_ni(rst_ni),.start_i(hs),.mode_i(2'd2),
         .output_length_i(16'd1024),.input_byte_i(inbyte),.input_valid_i(state==FEED),
         .input_ready_o(iready),.finalize_i(hfin),.output_byte_o(obyte),
-        .output_valid_o(oval),.output_ready_i(oready),.busy_o(),.done_o(hdone));
+        .output_valid_o(oval),.output_ready_i(oready),.busy_o(),.done_o(hdone),.abort_i(1'b0));
     always_comb begin
         inbyte=index<32?seed_i[8*index+:8]:(index==32?x_i:y_i);
         hs=state==HSTART;hfin=state==FINAL;oready=state==COLLECT||state==DRAIN;
