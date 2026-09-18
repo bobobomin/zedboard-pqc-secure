@@ -41,3 +41,11 @@ xsim.dir/
 Thumbs.db
 *.swp
 *~
+
+# Vitis unified IDE workspace artifacts
+.rigel_lopper/
+_ide/
+app_component/
+platform/
+vitis/
+*.xsa

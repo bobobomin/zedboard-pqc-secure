@@ -67,8 +67,13 @@ module tb_full_attack_fault_protection;
     if(!status[2]||!status[3])$fatal(1,"tampered public key accepted");
     $display("PASS embedded public-key tamper rejected by H(pk)");
 
-    reset_dut();load_vectors(0,0);force dut.dec.dec.forward_count=0;handshake();
-    release dut.dec.dec.forward_count;
+    /* Lose the count of the first NTT by overwriting the counter once, rather
+       than forcing it: a force on this always_ff variable makes XSim's default
+       optimizer miscompile the re-encryption FSM, which then hangs the first
+       handshake long before this check runs. */
+    reset_dut();load_vectors(0,0);
+    fork begin wait(dut.dec.dec.forward_count==2'd1);@(negedge clk);dut.dec.dec.forward_count=2'd0;end
+      begin handshake();end join
     if(!status[3])$fatal(1,"NTT operation-count fault accepted");
     $display("PASS missing NTT operation detected by operation counter");
 
