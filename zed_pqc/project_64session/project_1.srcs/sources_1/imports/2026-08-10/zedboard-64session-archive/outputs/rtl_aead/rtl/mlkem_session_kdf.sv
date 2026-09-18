@@ -43,7 +43,7 @@ module mlkem_session_kdf (
         .input_valid_i(hash_input_valid),.input_ready_o(hash_input_ready),
         .finalize_i(hash_finalize),.output_byte_o(hash_output_byte),
         .output_valid_o(hash_output_valid),.output_ready_i(1'b1),
-        .busy_o(),.done_o(hash_done));
+        .busy_o(),.done_o(hash_done),.abort_i(1'b0));
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if(!rst_ni) begin state<=K_IDLE;index<=0;material<=0;secret_reg<=0;

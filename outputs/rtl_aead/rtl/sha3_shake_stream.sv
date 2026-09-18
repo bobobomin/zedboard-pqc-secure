@@ -14,7 +14,8 @@ module sha3_shake_stream (
     output logic        output_valid_o,
     input  logic        output_ready_i,
     output logic        busy_o,
-    output logic        done_o
+    output logic        done_o,
+    input  logic        abort_i
 );
     localparam logic [1:0] MODE_SHA3_256 = 2'd0;
     localparam logic [1:0] MODE_SHA3_512 = 2'd1;
@@ -149,28 +150,54 @@ module sha3_shake_stream (
                     end
                 end
 
-                S_SQUEEZE: if (output_valid_o && output_ready_i) begin
-                    if (output_count + 16'd1 == output_length) begin
+                                S_SQUEEZE: begin
+                    if (abort_i) begin
                         done_o        <= 1'b1;
                         control_state <= S_IDLE;
-                    end else if (squeeze_position == rate_last) begin
-                        permutation_start <= 1'b1;
-                        squeeze_position  <= 8'd0;
-                        output_count      <= output_count + 16'd1;
-                        control_state     <= S_PERM_SQUEEZE;
-                    end else begin
-                        squeeze_position <= squeeze_position + 8'd1;
-                        output_count     <= output_count + 16'd1;
+                    end
+                    else if (output_valid_o && output_ready_i) begin
+
+                        output_count <= output_count + 16'd1;
+                        if (output_count + 16'd1 == output_length) begin
+                            done_o        <= 1'b1;
+                            control_state <= S_IDLE;
+                        end
+
+                        else if (squeeze_position == rate_last) begin
+                            permutation_start <= 1'b1;
+                            squeeze_position  <= 8'd0;
+                            control_state     <= S_PERM_SQUEEZE;
+                        end
+
+   
+                        else begin
+                            squeeze_position <= squeeze_position + 8'd1;
+                        end
                     end
                 end
 
-                S_PERM_SQUEEZE: if (permutation_done) begin
-                    sponge_state <= permutation_output;
-                    control_state <= S_SQUEEZE;
+
+                S_PERM_SQUEEZE: begin
+                    if (permutation_done) begin
+                        sponge_state <= permutation_output;
+
+                        if (abort_i) begin
+                            done_o        <= 1'b1;
+                            control_state <= S_IDLE;
+                        end
+                        else begin
+                            control_state <= S_SQUEEZE;
+                        end
+                    end
                 end
 
-                default: control_state <= S_IDLE;
+
+                default: begin
+                    control_state <= S_IDLE;
+                end
+
             endcase
         end
     end
+
 endmodule

@@ -9,7 +9,7 @@ module mlkem_hash_g(input logic clk_i,input logic rst_ni,input logic start_i,
         .output_length_i(16'd64),.input_byte_i(data_i[8*index+:8]),
         .input_valid_i(state==FEED),.input_ready_o(iready),.finalize_i(hfin),
         .output_byte_o(obyte),.output_valid_o(oval),.output_ready_i(1'b1),
-        .busy_o(),.done_o(hdone));
+        .busy_o(),.done_o(hdone),.abort_i(1'b0));
     always_comb begin hs=state==HSTART;hfin=state==FINAL;busy_o=state!=IDLE;done_o=state==DONE;end
     always_ff @(posedge clk_i or negedge rst_ni)begin
         if(!rst_ni)begin state<=IDLE;index<=0;digest_o<=0;end else case(state)
