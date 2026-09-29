@@ -5,11 +5,15 @@ module tb_mlkem_poly_accelerator;
     logic [7:0] host_addr;
     logic signed [15:0] host_wdata,host_rdata;
     logic busy,done;
+    /* set_i names the bank half the arithmetic uses; the host port always
+       addresses the other one, so hold it high to reach half 0 from the host
+       and drop it only while a command runs. */
+    logic set_sel;
     integer i;
     always #5 clk=~clk;
 
     mlkem_poly_accelerator dut(.*,
-        .clk_i(clk),.rst_ni(rst_n),.start_i(start),.command_i(command),
+        .clk_i(clk),.rst_ni(rst_n),.start_i(start),.command_i(command),.set_i(set_sel),
         .busy_o(busy),.done_o(done),.host_we_i(host_we),.host_bank_i(host_bank),
         .host_addr_i(host_addr),.host_wdata_i(host_wdata),.host_rdata_o(host_rdata));
 
@@ -18,8 +22,8 @@ module tb_mlkem_poly_accelerator;
             @(posedge clk); #1; host_we=0; end
     endtask
     task automatic run_command(input [1:0] cmd);
-        begin command=cmd; start=1; @(posedge clk); #1; start=0;
-            wait(done); @(posedge clk); #1; end
+        begin set_sel=0; command=cmd; start=1; @(posedge clk); #1; start=0;
+            wait(done); @(posedge clk); #1; set_sel=1; @(posedge clk); #1; end
     endtask
     task automatic check(input [1:0] bank,input integer address,
                          input integer expected,input string name);
@@ -30,7 +34,7 @@ module tb_mlkem_poly_accelerator;
     endtask
 
     initial begin
-        start=0;host_we=0;command=0;host_bank=0;host_addr=0;host_wdata=0;
+        start=0;host_we=0;command=0;host_bank=0;host_addr=0;host_wdata=0;set_sel=1;
         repeat(4) @(posedge clk);rst_n=1;@(posedge clk);
         for(i=0;i<256;i=i+1) begin
             write_coeff(0,i,(i*17+3)%3329);

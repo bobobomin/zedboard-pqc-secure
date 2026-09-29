@@ -27,7 +27,7 @@ module mlkem512_kpke_reencrypt_engine(
     mlkem_noise_poly_generator noise(clk_i,rst_ni,ns,coins_i,nonce,eta3,nslot,,nd,nwe,npa,npd);
     mlkem_matrix_poly_generator matrix(clk_i,rst_ni,ms,rho_i,mx,my,mslot,,md,merr,mwe,mpa,mpd);
     mlkem_poly_frommsg_controller frommsg(clk_i,rst_ni,fs,message_i,4'd7,,fd,fwe,fpa,fpd);
-    mlkem_poly_bridge_controller bridge(clk_i,rst_ni,bs,bcmd,bsa,bsb,bsd,,bd,bwe,bpa,bpd,poly_rdata_i);
+    mlkem_poly_bridge_controller bridge(clk_i,rst_ni,bs,bcmd,bsa,bsb,bsd,,,bd,bwe,bpa,bpd,poly_rdata_i);
     mlkem_poly_addsub_controller addsub(clk_i,rst_ni,as,sub,asa,asb,asd,,ad,awe,apa,apd,poly_rdata_i);
     mlkem512_pack_compare_controller compare(clk_i,rst_ni,cs,cclear,cmode,cslot,cbase,,cd,cmis,cpa,poly_rdata_i,ccta,ct_rdata_i);
     function automatic logic in_pair(input integer s,input integer a,input integer b);
