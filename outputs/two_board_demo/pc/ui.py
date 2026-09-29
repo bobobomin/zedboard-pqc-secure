@@ -54,6 +54,7 @@ class DemoUI:
             "sub": pygame.font.SysFont("segoeui,arial", 25, bold=True),
             "title": pygame.font.SysFont("segoeui,arial", 34, bold=True),
             "big": pygame.font.SysFont("segoeui,arial", 44, bold=True),
+            "num": pygame.font.SysFont("segoeui,arial", 30, bold=True),
         }
         self.vehicle_rects: dict[int, pygame.Rect] = {}
         self.buttons: dict[str, pygame.Rect] = {}
@@ -99,7 +100,8 @@ class DemoUI:
         self._draw_road()
         self._draw_board_panel("A", pygame.Rect(40, 470, 470, 280), BLUE)
         self._draw_board_panel("B", pygame.Rect(530, 470, 470, 280), ORANGE)
-        self._draw_event_log(pygame.Rect(1020, 470, 540, 380))
+        self._draw_kem_panel(pygame.Rect(1020, 470, 540, 215))
+        self._draw_event_log(pygame.Rect(1020, 697, 540, 153))
         self._draw_controls(pygame.Rect(40, 770, 960, 80))
         scaled = pygame.transform.smoothscale(self.canvas, self.screen.get_size())
         self.screen.blit(scaled, (0, 0))
@@ -133,11 +135,12 @@ class DemoUI:
             "ML-KEM session establishment  +  ChaCha20-Poly1305 authenticated data",
             (42, 67), "small", MUTED,
         )
-        mode = "MOCK MODE" if self.controller.is_mock else "2-BOARD UART"
-        badge_color = (36, 89, 76) if self.controller.is_mock else (35, 73, 128)
+        if self.controller.is_mock:
+            self._draw_legend(right=1560, center_y=52)
+            return
         badge = pygame.Rect(1325, 30, 235, 44)
-        pygame.draw.rect(self.canvas, badge_color, badge, border_radius=22)
-        self._text(mode, badge.center, "small", WHITE, "center")
+        pygame.draw.rect(self.canvas, (35, 73, 128), badge, border_radius=22)
+        self._text("2-BOARD UART", badge.center, "small", WHITE, "center")
         self._draw_legend(right=1305, center_y=52)
 
     def _draw_legend(self, right: int, center_y: int) -> None:
@@ -335,13 +338,17 @@ class DemoUI:
             label_color = BG if vehicle_id is not None else (87, 103, 127)
             self._text(label, cell_rect.center, "xs", label_color, "center")
 
-        sx = rect.x + 386
+        sx = rect.x + 382
         self._text("ACTIVE", (sx, grid_y), "xs", MUTED)
-        self._text(f"{stats.active_count}/64", (sx, grid_y + 20), "big", accent)
-        self._text("PENDING", (sx, grid_y + 77), "xs", MUTED)
-        self._text(str(worker.pending_count), (sx, grid_y + 98), "sub")
-        self._text("LAST ML-KEM", (sx, grid_y + 137), "xs", MUTED)
-        self._text(f"{stats.last_kem_us} us", (sx, grid_y + 158), "body")
+        self._text(f"{stats.active_count}/64", (sx, grid_y + 16), "num", accent)
+        self._text("PENDING", (sx, grid_y + 58), "xs", MUTED)
+        self._text(str(worker.pending_count), (sx, grid_y + 75), "body")
+        self._text("LAST KEM", (sx, grid_y + 110), "xs", MUTED)
+        self._text(f"{stats.last_kem_us} us", (sx, grid_y + 127), "body")
+        if stats.kem_samples:
+            self._text(f"avg {stats.average_kem_us:.0f} us", (sx, grid_y + 156), "xs", GREEN)
+        else:
+            self._text("avg --", (sx, grid_y + 156), "xs", MUTED)
 
         footer_y = rect.bottom - 28
         self._text(f"DATA OK  {stats.data_ok}", (rect.x + 20, footer_y), "xs", GREEN)
@@ -349,11 +356,93 @@ class DemoUI:
         self._text(f"BLOCKED  {stats.attacks_blocked}", (rect.x + 245, footer_y), "xs", YELLOW)
         self._text(f"RTT  {stats.last_rtt_ms:.1f} ms", (rect.right - 18, footer_y), "xs", MUTED, "topright")
 
+    def _draw_kem_panel(self, rect: pygame.Rect) -> None:
+        """Live ML-KEM analysis: PL hardware vs PS software decapsulation time."""
+        self._round_panel(rect)
+        ctrl = self.controller
+        samples = ctrl.kem_samples
+        self._text("ML-KEM LIVE ANALYSIS", (rect.x + 22, rect.y + 12), "small")
+        self._text(f"PL n={samples}   SW n={ctrl.sw_samples}", (rect.right - 20, rect.y + 15),
+                   "xs", MUTED, "topright")
+
+        # ---- left: key numbers
+        lx, ly = rect.x + 22, rect.y + 44
+        ps = ctrl.ps_kem_us
+        avg = ctrl.average_pl_kem_us
+        self._text("SPEEDUP  PS SW / PL HW", (lx, ly), "xs", MUTED)
+        if samples:
+            self._text(f"{ctrl.mlkem_speedup:.2f}x", (lx, ly + 16), "big", GREEN)
+        else:
+            self._text("--", (lx, ly + 16), "big", MUTED)
+        sw_tag = "live" if ctrl.sw_live else "ref"
+        rows = [
+            (f"PS SW avg ({sw_tag})", f"{ps:.0f} us", RED),
+            ("PL HW avg", f"{avg:.0f} us" if samples else "--", GREEN),
+        ]
+        if samples:
+            lo, hi = ctrl.kem_min_max
+            rows.append(("PL min / max", f"{lo} / {hi} us", TEXT))
+            rows.append(("jitter / rate", f"{ctrl.recent_jitter_us:.0f} us / {ctrl.kem_rate_per_s:.1f}/s", TEXT))
+        y = ly + 74
+        for label, value, color in rows:
+            self._text(label, (lx, y), "xs", MUTED)
+            self._text(value, (lx + 205, y), "xs", color, "topright")
+            y += 21
+
+        # ---- right: scrolling time chart (last CHART_WINDOW_S seconds)
+        chart = pygame.Rect(rect.x + 250, rect.y + 44, rect.width - 272, rect.height - 66)
+        pygame.draw.rect(self.canvas, PANEL_2, chart, border_radius=8)
+        window = 30.0
+        now = time.monotonic()
+        pl = [(t, b, k, r) for t, b, k, r in ctrl.kem_history if now - t <= window]
+        sw = [(t, b, k) for t, b, k in ctrl.sw_history if now - t <= window]
+        top = max([ps] + [k for _, _, k, _ in pl] + [k for _, _, k in sw]) * 1.15
+
+        def y_of(value: float) -> int:
+            return int(chart.bottom - 6 - (value / top) * (chart.height - 12))
+
+        def x_of(t: float) -> int:
+            return int(chart.right - 8 - (now - t) / window * (chart.width - 16))
+
+        self._text("decaps time (us), last 30 s", (chart.x + 8, chart.y + 4), "xs", MUTED)
+        self._dashed_hline(chart, y_of(ps), RED)
+        self._text(f"SW {ps:.0f}", (chart.right - 6, y_of(ps) + 4), "xs", RED, "topright")
+        if samples:
+            self._dashed_hline(chart, y_of(avg), GREEN)
+            self._text(f"HW {avg:.0f}", (chart.right - 6, y_of(avg) + 8), "xs", GREEN, "topright")
+        if not pl and not sw:
+            if not samples:
+                self._text("waiting for ML-KEM sessions...", chart.center, "xs", MUTED, "center")
+            return
+        for t, _, k in sw:
+            pygame.draw.circle(self.canvas, RED, (x_of(t), y_of(k)), 3)
+        for t, board, k, reason in pl:
+            color = BLUE if board == "A" else ORANGE
+            pos = (x_of(t), y_of(k))
+            pygame.draw.circle(self.canvas, color, pos, 3)
+            if reason == "handover":
+                pygame.draw.circle(self.canvas, YELLOW, pos, 5, 1)
+        # legend
+        lg_y = chart.bottom + 4
+        items = (("SW", RED), ("HW A", BLUE), ("HW B", ORANGE), ("handover", YELLOW))
+        cx = chart.x + 10
+        for label, color in items:
+            pygame.draw.circle(self.canvas, color, (cx, lg_y + 8), 4)
+            surface = self.fonts["xs"].render(label, True, MUTED)
+            self.canvas.blit(surface, (cx + 8, lg_y))
+            cx += surface.get_width() + 24
+
+    def _dashed_hline(self, box: pygame.Rect, y: int, color, dash: int = 8, gap: int = 6) -> None:
+        x = box.x + 6
+        while x < box.right - 6:
+            pygame.draw.line(self.canvas, color, (x, y), (min(x + dash, box.right - 6), y), 1)
+            x += dash + gap
+
     def _draw_event_log(self, rect: pygame.Rect) -> None:
         self._round_panel(rect)
-        self._text("LIVE EVENT LOG", (rect.x + 22, rect.y + 18), "sub")
-        self._text(f"HANDOVERS  {self.controller.handovers}", (rect.right - 20, rect.y + 22), "xs", YELLOW, "topright")
-        y = rect.y + 62
+        self._text("LIVE EVENT LOG", (rect.x + 22, rect.y + 12), "small")
+        self._text(f"HANDOVERS  {self.controller.handovers}", (rect.right - 20, rect.y + 15), "xs", YELLOW, "topright")
+        y = rect.y + 42
         colors = {
             "OPEN": GREEN,
             "HO": YELLOW,
@@ -364,6 +453,8 @@ class DemoUI:
             "SYSTEM": BLUE,
         }
         for kind, message in self.controller.events:
+            if y + 20 > rect.bottom - 6:
+                break
             color = colors.get(kind, TEXT)
             pygame.draw.circle(self.canvas, color, (rect.x + 18, y + 10), 4)
             clipped = message if len(message) <= 58 else message[:55] + "..."

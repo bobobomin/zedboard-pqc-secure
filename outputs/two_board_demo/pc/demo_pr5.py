@@ -24,6 +24,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speed", type=float, default=25.0, help="metres per second")
     parser.add_argument("--lanes", type=int, default=2, help="lanes per direction (1..3)")
     parser.add_argument("--seed", type=int, default=None, help="fix vehicle mix for rehearsal")
+    parser.add_argument(
+        "--ps-kem-us", type=float, default=1258.523,
+        help="measured Cortex-A9 software ML-KEM baseline in microseconds",
+    )
     parser.add_argument("--fullscreen", action="store_true")
     args = parser.parse_args()
     if not args.mock and not (args.board_a and args.board_b):
@@ -34,6 +38,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--vehicles must be 1..64")
     if not 1 <= args.lanes <= 3:
         parser.error("--lanes must be 1..3")
+    if args.ps_kem_us <= 0:
+        parser.error("--ps-kem-us must be positive")
     return args
 
 
@@ -62,7 +68,8 @@ def main() -> int:
     try:
         board_a, board_b = make_workers(args)
         controller = DemoController(
-            board_a, board_b, args.vehicles, args.speed, args.lanes, args.seed
+            board_a, board_b, args.vehicles, args.speed, args.lanes, args.seed,
+            args.ps_kem_us,
         )
         ui = DemoUI(controller, fullscreen=args.fullscreen)
         clock = pygame.time.Clock()

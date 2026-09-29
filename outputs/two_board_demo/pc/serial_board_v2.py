@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Optional
 
 from board_link import PACKET_BYTES, Session  # Existing demo data model.
 from pqc_crypto import SessionKeys, derive_session, encaps, open_response, seal
@@ -16,7 +17,8 @@ from pqc_crypto import SessionKeys, derive_session, encaps, open_response, seal
 
 class SerialBoardLink:
     RESPONSE_PREFIXES = (
-        "HELLO ", "RESET ", "READY ", "RESP ", "ERR ", "BYE", "LEFT ", "STATUS "
+        "HELLO ", "RESET ", "READY ", "RESP ", "ERR ", "BYE", "LEFT ", "STATUS ",
+        "SWKEM ",
     )
 
     def __init__(self, name: str, port_name: str, baud: int, _unused_vector_dir: Path,
@@ -82,6 +84,21 @@ class SerialBoardLink:
         if len(fields) != 4 or fields[0] != "STATUS":
             raise RuntimeError(f"Malformed STATUS: {' '.join(fields)}")
         return int(fields[1]), (int(fields[2], 16) << 32) | int(fields[3], 16)
+
+    def sw_kem(self) -> Optional[tuple[int, bool]]:
+        """Time one software ML-KEM-512 decaps on the board's Cortex-A9.
+
+        Reply format: ``SWKEM <us> <1|0>`` (1 = shared secret matched the KAT).
+        Returns None when the firmware does not implement the command.
+        """
+        try:
+            line = self._send("SWKEM")
+        except TimeoutError:
+            return None
+        fields = line.split()
+        if len(fields) == 3 and fields[0] == "SWKEM":
+            return int(fields[1]), fields[2] == "1"
+        return None
 
     def open_session(self, vehicle_id: int, slot: int) -> Session:
         if slot in self._sessions:

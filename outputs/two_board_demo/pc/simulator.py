@@ -17,6 +17,10 @@ ROAD_PIXELS = 1400.0                  # must match the road width drawn in ui.py
 PX_PER_METER = ROAD_PIXELS / ROAD_METERS
 MIN_GAP_METERS = 3.0                  # bumper-to-bumper gap kept in the same lane
 MAX_LANES_PER_DIRECTION = 3
+DEFAULT_PS_MLKEM_US = 1258.523        # measured Cortex-A9 software ML-KEM baseline
+KEM_HISTORY = 120                     # samples kept for the live chart
+KEM_RATE_WINDOW_S = 10.0
+SWKEM_INTERVAL_S = 2.0                # per board: one PS software ML-KEM timing
 
 
 @dataclass(frozen=True)
@@ -80,12 +84,21 @@ class DemoController:
         speed_mps: float = 40.0,
         lanes_per_direction: int = 2,
         seed: Optional[int] = None,
+        ps_kem_us: float = DEFAULT_PS_MLKEM_US,
     ):
         if vehicle_count not in range(1, MAX_SESSIONS + 1):
             raise ValueError("vehicle count must be 1..64")
         if lanes_per_direction not in range(1, MAX_LANES_PER_DIRECTION + 1):
             raise ValueError(f"lanes per direction must be 1..{MAX_LANES_PER_DIRECTION}")
+        if ps_kem_us <= 0:
+            raise ValueError("PS ML-KEM baseline must be positive")
         self.workers = {"A": board_a, "B": board_b}
+        self.ps_kem_ref_us = ps_kem_us    # used until the boards report live SW timings
+        # (monotonic time, board, kem_us, reason) for every completed ML-KEM session setup
+        self.kem_history: deque[tuple[float, str, int, str]] = deque(maxlen=KEM_HISTORY)
+        # (monotonic time, board, sw_us) for every live PS software ML-KEM timing
+        self.sw_history: deque[tuple[float, str, int]] = deque(maxlen=KEM_HISTORY)
+        self._next_swkem = {"A": 0.0, "B": 1.0}
         self.vehicle_count = vehicle_count
         self.speed_mps = speed_mps
         self.lanes_per_direction = lanes_per_direction
@@ -102,7 +115,7 @@ class DemoController:
         self._pending: dict[int, tuple[str, int, dict]] = {}
         self._reserved = {"A": set(), "B": set()}
         self.vehicles = self._make_initial_vehicles(vehicle_count)
-        self.log("SYSTEM", "Mock simulation ready" if self.is_mock else "Boards connected")
+        self.log("SYSTEM", "Simulation ready" if self.is_mock else "Boards connected")
         for vehicle in self.vehicles:
             self._request_open(vehicle, self._board_for_position(vehicle.position_m), "entry")
 
@@ -113,6 +126,63 @@ class DemoController:
     @property
     def lane_count(self) -> int:
         return self.lanes_per_direction * 2
+
+    # ------------------------------------------------------------------ ML-KEM analysis
+
+    @property
+    def kem_samples(self) -> int:
+        return sum(w.stats.kem_samples for w in self.workers.values())
+
+    @property
+    def average_pl_kem_us(self) -> float:
+        samples = self.kem_samples
+        if samples == 0:
+            return 0.0
+        return sum(w.stats.kem_total_us for w in self.workers.values()) / samples
+
+    @property
+    def sw_samples(self) -> int:
+        return sum(w.stats.sw_samples for w in self.workers.values())
+
+    @property
+    def sw_live(self) -> bool:
+        return self.sw_samples > 0
+
+    @property
+    def ps_kem_us(self) -> float:
+        """PS software ML-KEM time: live average if measured, else the reference."""
+        samples = self.sw_samples
+        if samples == 0:
+            return self.ps_kem_ref_us
+        return sum(w.stats.sw_total_us for w in self.workers.values()) / samples
+
+    @property
+    def mlkem_speedup(self) -> float:
+        average = self.average_pl_kem_us
+        return self.ps_kem_us / average if average > 0 else 0.0
+
+    @property
+    def kem_min_max(self) -> tuple[int, int]:
+        stats = [w.stats for w in self.workers.values() if w.stats.kem_samples]
+        if not stats:
+            return 0, 0
+        return min(s.kem_min_us for s in stats), max(s.kem_max_us for s in stats)
+
+    @property
+    def kem_rate_per_s(self) -> float:
+        """ML-KEM session setups completed per second over the recent window."""
+        cutoff = time.monotonic() - KEM_RATE_WINDOW_S
+        recent = sum(1 for t, *_ in self.kem_history if t >= cutoff)
+        return recent / KEM_RATE_WINDOW_S
+
+    @property
+    def recent_jitter_us(self) -> float:
+        """Standard deviation of the samples currently shown on the chart."""
+        values = [k for _, _, k, _ in self.kem_history]
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        return (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** 0.5
 
     # ------------------------------------------------------------------ setup
 
@@ -207,10 +277,21 @@ class DemoController:
         dt = min(dt, 0.1)
         self.sim_time += dt
         now = time.monotonic()
+        self._schedule_swkem(now)
         # Front-most vehicles first, so each follower sees its leader's new position.
         order = sorted(self.vehicles, key=lambda v: -v.direction * v.position_m)
         for vehicle in order:
             self._step_vehicle(vehicle, dt, now)
+
+    def _schedule_swkem(self, now: float) -> None:
+        for name, worker in self.workers.items():
+            if worker.stats.sw_supported is False or now < self._next_swkem[name]:
+                continue
+            if any(kind == "swkem" and ctx.get("board") == name
+                   for kind, _, ctx in self._pending.values()):
+                continue
+            self._submit(name, "swkem", -1, None, context={"board": name})
+            self._next_swkem[name] = now + SWKEM_INTERVAL_S
 
     def _leader_of(self, vehicle: Vehicle) -> Optional[Vehicle]:
         best, best_dist = None, None
@@ -352,6 +433,9 @@ class DemoController:
                 if pending is None:
                     continue
                 kind, vehicle_id, context = pending
+                if kind == "swkem":
+                    self._handle_swkem(result)
+                    continue
                 vehicle = self.vehicle_by_id(vehicle_id)
                 if kind == "open" and result.slot is not None:
                     self._reserved[result.board].discard(result.slot)
@@ -366,6 +450,14 @@ class DemoController:
                 elif kind == "data":
                     self._handle_data(vehicle, result, context)
 
+    def _handle_swkem(self, result: BoardResult) -> None:
+        if result.sw_us:
+            self.sw_history.append((time.monotonic(), result.board, result.sw_us))
+            if not result.ok:
+                self.log("ERROR", f"Board {result.board} SW ML-KEM secret mismatch")
+        elif not self.is_mock:
+            self.log("SYSTEM", f"Board {result.board}: no SWKEM in firmware, PS SW = reference")
+
     def _handle_open(self, vehicle: Vehicle, result: BoardResult, context: dict) -> None:
         old_board, old_slot = vehicle.old_board, vehicle.old_slot
         vehicle.board = result.board
@@ -374,6 +466,10 @@ class DemoController:
         vehicle.state = "connected"
         vehicle.next_data_at = time.monotonic() + 0.4
         reason = context.get("reason")
+        if result.session is not None:
+            self.kem_history.append(
+                (time.monotonic(), result.board, result.session.kem_us, reason or "entry")
+            )
         if reason == "handover":
             self.handovers += 1
             self.log(

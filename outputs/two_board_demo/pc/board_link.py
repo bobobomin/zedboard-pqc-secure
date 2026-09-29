@@ -46,6 +46,15 @@ class BoardStats:
         default_factory=lambda: [None] * MAX_SESSIONS
     )
     last_kem_us: int = 0
+    kem_total_us: int = 0
+    kem_samples: int = 0
+    kem_min_us: int = 0
+    kem_max_us: int = 0
+    sw_supported: Optional[bool] = None   # None = not probed yet
+    sw_total_us: int = 0
+    sw_samples: int = 0
+    last_sw_us: int = 0
+    sw_mismatch: int = 0
     opens: int = 0
     leaves: int = 0
     data_ok: int = 0
@@ -59,6 +68,28 @@ class BoardStats:
     @property
     def active_count(self) -> int:
         return sum(vehicle is not None for vehicle in self.slots)
+
+    @property
+    def average_kem_us(self) -> float:
+        return self.kem_total_us / self.kem_samples if self.kem_samples else 0.0
+
+    @property
+    def average_sw_us(self) -> float:
+        return self.sw_total_us / self.sw_samples if self.sw_samples else 0.0
+
+    def record_sw(self, sw_us: int, match: bool) -> None:
+        self.last_sw_us = sw_us
+        self.sw_total_us += sw_us
+        self.sw_samples += 1
+        if not match:
+            self.sw_mismatch += 1
+
+    def record_kem(self, kem_us: int) -> None:
+        self.last_kem_us = kem_us
+        self.kem_total_us += kem_us
+        self.kem_samples += 1
+        self.kem_min_us = kem_us if self.kem_samples == 1 else min(self.kem_min_us, kem_us)
+        self.kem_max_us = max(self.kem_max_us, kem_us)
 
 
 @dataclass(frozen=True)
@@ -85,6 +116,7 @@ class BoardResult:
     rx_us: int = 0
     tx_us: int = 0
     rtt_ms: float = 0.0
+    sw_us: int = 0
 
 
 class MockBoardLink:
@@ -110,10 +142,15 @@ class MockBoardLink:
             vehicle_id=vehicle_id,
             slot=slot,
             sid=sid,
-            kem_us=self._rng.randint(480, 690),
+            kem_us=self._rng.randint(530, 578),
         )
         self._sessions[slot] = session
         return session
+
+    def sw_kem(self) -> Optional[tuple[int, bool]]:
+        """Model of the SWKEM command: one PS software ML-KEM decaps."""
+        time.sleep(self._rng.uniform(0.012, 0.020))
+        return self._rng.randint(1238, 1279), True
 
     def leave_session(self, slot: int) -> Session:
         if slot not in self._sessions:
@@ -378,7 +415,7 @@ class BoardWorker:
                     assert command.slot is not None
                     session = self.board.open_session(command.vehicle_id, command.slot)
                     self.stats.slots[session.slot] = command.vehicle_id
-                    self.stats.last_kem_us = session.kem_us
+                    self.stats.record_kem(session.kem_us)
                     self.stats.opens += 1
                     result = BoardResult(
                         command.command_id, self.name, command.kind,
@@ -395,6 +432,11 @@ class BoardWorker:
                         command.vehicle_id, True, command.slot,
                         detail="LEFT",
                     )
+                elif command.kind == "swkem":
+                    result = self._run_swkem(command)
+                    self.commands.task_done()
+                    self.results.put(result)
+                    continue
                 elif command.kind == "data":
                     assert command.slot is not None
                     info = self.board.send_data(
@@ -426,6 +468,29 @@ class BoardWorker:
                     command.vehicle_id, False, command.slot,
                     detail=str(exc),
                 )
-            finally:
-                self.commands.task_done()
+            self.commands.task_done()
             self.results.put(result)
+
+    def _run_swkem(self, command: BoardCommand) -> BoardResult:
+        """Ask the board to time one software ML-KEM decaps on the Cortex-A9.
+
+        Firmware without the SWKEM command answers ERR (or nothing); the board is
+        then marked unsupported and the GUI falls back to the fixed baseline.
+        """
+        probe = getattr(self.board, "sw_kem", None)
+        info = None
+        if probe is not None:
+            try:
+                info = probe()
+            except Exception:
+                info = None
+        if info is None:
+            self.stats.sw_supported = False
+            return BoardResult(command.command_id, self.name, command.kind,
+                               command.vehicle_id, False, detail="SWKEM unsupported")
+        sw_us, match = info
+        self.stats.sw_supported = True
+        self.stats.record_sw(sw_us, match)
+        return BoardResult(command.command_id, self.name, command.kind,
+                           command.vehicle_id, match, sw_us=sw_us,
+                           detail="SWKEM ok" if match else "SWKEM secret mismatch")
