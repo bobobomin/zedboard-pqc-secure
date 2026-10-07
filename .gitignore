@@ -49,3 +49,11 @@ app_component/
 platform/
 vitis/
 *.xsa
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Board B secret key header (never commit)
+board_b_keys.h
